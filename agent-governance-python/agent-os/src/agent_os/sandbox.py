@@ -219,6 +219,8 @@ class SandboxConfig(BaseModel):
             violation (fail-closed).
         enable_continuity: When True, enables pre‑/post‑execution hashing of
             observer identity and reference frame to detect drift (default False).
+        enforcement_mode: Mode for continuity drift handling: "enforce" (default)
+            raises SecurityError on drift; "audit" logs but does not block.
     """
 
     blocked_modules: list[str] = Field(default_factory=lambda: list(_DEFAULT_BLOCKED_MODULES))
@@ -228,7 +230,8 @@ class SandboxConfig(BaseModel):
     max_cpu_seconds: int | None = None
     shadow_sys_modules: bool = True
     enforce_ast_validation: bool = True
-    enable_continuity: bool = False   # <-- NEW FIELD
+    enable_continuity: bool = False
+    enforcement_mode: str = Field(default="enforce")  # <-- NEW FIELD: "enforce" or "audit"
 
 
 @dataclass
@@ -636,6 +639,11 @@ class ExecutionSandbox:
         self.policy = policy
         self._hook = SandboxImportHook(self.config.blocked_modules)
 
+        # Validate enforcement_mode if continuity is enabled (optional, but safe)
+        if self.config.enable_continuity:
+            if self.config.enforcement_mode not in ("enforce", "audit"):
+                raise ValueError("enforcement_mode must be 'enforce' or 'audit'")
+
         # Continuity verification support
         self.continuity = None
         if self.config.enable_continuity:
@@ -863,14 +871,20 @@ class ExecutionSandbox:
             delegation_chain=context.get("delegation_chain", []),
             external_reference_state=context.get("external_reference_state", {}),
         )
-        # Log the trace to stderr (production could use logging).
+        # Always log the trace (stderr or logging)
         print(trace.to_json(), file=sys.stderr)
+
         if not trace.continuity_valid:
-            raise SecurityError(
-                f"Continuity drift detected: {trace.reference_frame_diff}",
-                error_code="CONTINUITY_DRIFT",
-                details={"trace": trace.__dict__},
-            )
+            mode = getattr(self.config, "enforcement_mode", "enforce")
+            if mode == "enforce":
+                raise SecurityError(
+                    f"Continuity drift detected: {trace.reference_frame_diff}",
+                    error_code="CONTINUITY_DRIFT",
+                    details={"trace": trace.__dict__},
+                )
+            else:  # audit mode
+                import logging
+                logging.warning(f"Continuity drift in audit mode: {trace.reference_frame_diff}")
         return trace
 
     def execute_code_sandboxed(
@@ -903,7 +917,7 @@ class ExecutionSandbox:
         Raises:
             SecurityError: If validation finds any violation, or if execution
                 triggers a blocked import / builtin / sys.modules access,
-                or if continuity drift is detected (when enabled).
+                or if continuity drift is detected (when enabled and in enforce mode).
         """
         if self.config.enforce_ast_validation:
             violations = self.validate_code(code)
