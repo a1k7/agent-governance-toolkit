@@ -37,8 +37,8 @@ from typing import Any, Callable, Optional
 
 from pydantic import BaseModel, Field
 
-from agent_os.exceptions import SecurityError
 from agent_os.continuity import ContinuityVerifier, ContinuityTrace
+from agent_os.exceptions import SecurityError
 
 
 class SandboxSecurityWarning(UserWarning):
@@ -231,7 +231,7 @@ class SandboxConfig(BaseModel):
     shadow_sys_modules: bool = True
     enforce_ast_validation: bool = True
     enable_continuity: bool = False
-    enforcement_mode: str = Field(default="enforce")  # <-- NEW FIELD: "enforce" or "audit"
+    enforcement_mode: str = Field(default="enforce")
 
 
 @dataclass
@@ -647,7 +647,7 @@ class ExecutionSandbox:
         # Continuity verification support
         self.continuity = None
         if self.config.enable_continuity:
-            self.continuity = ContinuityVerifier(sandbox_id=f"exec-sandbox-{id(self)}")
+            self.continuity = ContinuityVerifier(execution_id=f"exec-sandbox-{id(self)}")
 
     def check_import(self, module_name: str) -> bool:
         """Check if a module import is allowed.
@@ -849,7 +849,6 @@ class ExecutionSandbox:
         """Capture pre‑execution hashes using current governance context."""
         if not self.config.enable_continuity or self.continuity is None:
             return
-        # Default values if context missing – fail‑closed with unknown identity.
         self.continuity.capture_pre_state(
             agent_id=context.get("agent_id", "unknown"),
             session_id=context.get("session_id", "unknown"),
@@ -871,9 +870,8 @@ class ExecutionSandbox:
             delegation_chain=context.get("delegation_chain", []),
             external_reference_state=context.get("external_reference_state", {}),
         )
-        # Always log the trace (stderr or logging)
+        # Log the trace to stderr (production could use logging).
         print(trace.to_json(), file=sys.stderr)
-
         if not trace.continuity_valid:
             mode = getattr(self.config, "enforcement_mode", "enforce")
             if mode == "enforce":
