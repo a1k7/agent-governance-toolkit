@@ -57,9 +57,9 @@ This allows an auditor to replay the exact governance state years later and veri
 
 ## Performance
 
-Reference implementation (Nanogate) achieves **530 ns** median evaluation latency, **0 false admits** after 100k adversarial mutations, **0 false denies** after 100k stable traces.
+A reference implementation achieves **530 ns** median evaluation latency, **0 false admits** after 100k adversarial mutations, **0 false denies** after 100k stable traces.
 
 ## References
 
-- Nanogate: https://github.com/a1k7/nanogate
-- DecisionAssure: https://github.com/a1k7/DecisionAssure-Runtime-Governance
+- Reference implementation: NanoGate (open‑source).
+- DecisionAssure trace engine (open‑source).
