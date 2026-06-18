@@ -277,3 +277,256 @@ python examples/batch_witness_demo.py sample_traces_large/ --framework autogen -
 ## 📄 License
 
 MIT
+
+# DecisionAssure Continuity
+
+**Discover what AI systems can do before they do it.**
+
+DecisionAssure Continuity is a governance engine for multi-agent systems that discovers emergent capabilities directly from execution traces, generates replayable capability witnesses, verifies them through counterfactual replay, and continuously evolves governance knowledge through human review.
+
+Traditional security systems look for known attacks.
+
+DecisionAssure looks for **capabilities**.
+
+A capability is not a single action.
+
+It is a coordinated sequence of actions that collectively enable a dangerous outcome.
+
+Examples include:
+
+* Credential Exfiltration
+* Privilege Escalation
+* Model Exfiltration
+* Secret Leakage
+* Backdoor Installation
+* Collusive Coordination
+* Identity Theft
+
+The system discovers these capabilities from traces, produces cryptographic evidence, and enables governance teams to continuously improve detection through ontology evolution.
+
+---
+
+## Why This Exists
+
+Modern AI systems increasingly operate as teams of agents.
+
+Individual actions may appear harmless:
+
+Agent A reads credentials.
+
+Agent B accesses a database.
+
+Agent C exports data.
+
+Viewed independently, none of these actions necessarily indicate malicious behavior.
+
+Viewed together, they form a capability:
+
+**Credential Exfiltration**
+
+Most monitoring systems reason about events.
+
+DecisionAssure reasons about capabilities.
+
+---
+
+## Core Innovation
+
+DecisionAssure introduces the concept of a:
+
+### Capability Witness
+
+A Capability Witness is a replayable governance artifact proving that a capability existed within a trace.
+
+Each witness contains:
+
+* Capability classification
+* Required actions
+* Confidence score
+* Severity
+* Counterfactual verification
+* Witness hash
+* Governance recommendation
+
+Example:
+
+Credential Exfiltration
+
+Required Actions:
+
+* alice → read_credentials
+* charlie → export_data
+
+Counterfactual Verification:
+
+Remove either action and the capability disappears.
+
+This produces evidence that can be replayed, audited, and independently verified.
+
+---
+
+## Governance Learning Loop
+
+DecisionAssure continuously learns.
+
+Unknown capabilities are not discarded.
+
+They enter a governance review workflow.
+
+Unknown Capability
+→ Human Review
+→ Ontology Update
+→ Historical Replay
+→ Governance Improvement
+
+Every approval expands governance knowledge.
+
+Every ontology update becomes auditable.
+
+Every historical replay measures governance impact.
+
+---
+
+## Governance Knowledge Accumulation Index (GKAI)
+
+Most governance systems measure compliance.
+
+DecisionAssure measures learning.
+
+GKAI tracks:
+
+* Governance knowledge growth
+* Ontology expansion
+* Capability coverage improvements
+* Knowledge gained per review cycle
+
+Example:
+
+Base Coverage: 23.1%
+
+After Ontology Evolution: 28.6%
+
+Knowledge Gain: +5.5%
+
+GKAI provides a quantitative measure of governance maturity.
+
+---
+
+## Historical Replay
+
+When governance knowledge changes, the system asks:
+
+"What incidents would have been detected if this capability had been known earlier?"
+
+DecisionAssure replays historical traces using the evolved ontology and calculates:
+
+* Previously missed incidents
+* Newly detected incidents
+* Coverage improvements
+* Governance impact
+
+This transforms governance from static policy into a continuously improving system.
+
+---
+
+## Architecture
+
+Trace Files
+↓
+Capability Discovery
+↓
+Classification
+↓
+Capability Witness
+↓
+Counterfactual Verification
+↓
+Governance Recommendation
+↓
+Review Queue
+↓
+Human Analyst
+↓
+Ontology Evolution
+↓
+Historical Replay
+↓
+Coverage Analysis
+↓
+GKAI
+
+---
+
+## Key Capabilities
+
+### Emergent Capability Discovery
+
+Discovers capabilities directly from traces without requiring predefined labels.
+
+### Capability Witness Engine
+
+Generates replayable evidence artifacts.
+
+### Counterfactual Verification
+
+Proves minimal capability requirements.
+
+### TRACE-Compatible Claims
+
+Exports capability witnesses as governance evidence.
+
+### Human Review Queue
+
+Routes unknown capabilities to analysts.
+
+### Ontology Evolution
+
+Converts reviewed capabilities into governance knowledge.
+
+### Historical Replay
+
+Measures the impact of newly acquired governance knowledge.
+
+### GKAI
+
+Tracks long-term governance learning.
+
+---
+
+## Example Governance Outcome
+
+Before Learning
+
+Classification Rate: 75%
+
+Unknown Capabilities: 1
+
+After Learning
+
+Classification Rate: 100%
+
+Unknown Capabilities: 0
+
+Governance Improvement
+
++25% Classification Rate
+
++5.5% Ontology Coverage
+
++3 Historical Incidents Detected
+
+---
+
+## Vision
+
+Security systems answer:
+
+"What happened?"
+
+Governance systems answer:
+
+"Was it allowed?"
+
+DecisionAssure answers:
+
+"What capability emerged, how do we prove it existed, and how does governance improve after learning about it?"
