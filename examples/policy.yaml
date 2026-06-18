@@ -1,0 +1,9 @@
+
+apiVersion: governance.toolkit/v1
+name: test-policy
+default_action: allow
+rules:
+  - name: block-destructive
+    condition: "action in ['DELETE FROM users', 'DROP TABLE users']"
+    action: deny
+    version: v1

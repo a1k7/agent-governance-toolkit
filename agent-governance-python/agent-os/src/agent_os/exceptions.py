@@ -1,204 +1,264 @@
+
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-"""
-Agent OS Exception Hierarchy
-
-Standardized exceptions with error codes for all Agent OS components.
-Each exception carries an error_code, optional details dict, and timestamp
-for structured error handling and logging.
-"""
-
-from __future__ import annotations
-
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from agent_os.policies.decision import PolicyCheckResult
-
 
 class AgentOSError(Exception):
-    """Base exception for all Agent OS errors."""
+    """Base class for all agent-os exceptions."""
+    pass
 
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message)
-        self.error_code = error_code or "AGENT_OS_ERROR"
-        self.details = details or {}
-        self.timestamp = datetime.now(timezone.utc).isoformat()
+class SecurityError(AgentOSError):
+    """Raised when a security policy is violated."""
+    pass
 
-    def to_dict(self):
-        return {
-            "error": self.error_code,
-            "message": str(self),
-            "details": self.details,
-            "timestamp": self.timestamp,
-        }
+class GovernanceDenied(SecurityError):
+    """Raised when a governance gate denies execution."""
+    pass
 
+class AdapterNotFoundError(AgentOSError):
+    """Raised when an integration adapter is not found."""
+    pass
 
-# --- Policy errors ---
-
-class PolicyError(AgentOSError):
-    """Base exception for policy-related errors."""
-
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message, error_code or "POLICY_ERROR", details)
-
-
-class PolicyViolationError(PolicyError):
-    """Raised when a governance policy check fails."""
-
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message, error_code or "POLICY_VIOLATION", details)
-        self.check_result = None
-
-    @classmethod
-    def from_check_result(cls, result: PolicyCheckResult) -> PolicyViolationError:
-        """Create a policy violation error from a structured check result."""
-
-        details = {
-            "category": result.category.value if result.category else None,
-            "matched_rule": result.matched_rule,
-            "detail": result.detail,
-            "scope": result.scope,
-            "operation": result.operation,
-            "tool_name": result.tool_name,
-            **result.audit_entry,
-        }
-        e = cls(result.public_message, "POLICY_VIOLATION", details)
-        e.check_result = result
-        return e
-
-
-class PolicyDeniedError(PolicyError):
-    """Raised when a policy explicitly denies an action."""
-
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message, error_code or "POLICY_DENIED", details)
-
-
-class PolicyTimeoutError(PolicyError):
-    """Raised when a policy evaluation times out."""
-
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message, error_code or "POLICY_TIMEOUT", details)
-
-
-# --- Budget errors ---
-
-class BudgetError(AgentOSError):
-    """Base exception for budget-related errors."""
-
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message, error_code or "BUDGET_ERROR", details)
-
-
-class BudgetExceededError(BudgetError):
-    """Raised when a budget limit is exceeded."""
-
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message, error_code or "BUDGET_EXCEEDED", details)
-
-
-class BudgetWarningError(BudgetError):
-    """Raised when approaching a budget limit."""
-
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message, error_code or "BUDGET_WARNING", details)
-
-
-# --- Identity errors ---
-
-class IdentityError(AgentOSError):
-    """Base exception for identity-related errors."""
-
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message, error_code or "IDENTITY_ERROR", details)
-
-
-class IdentityVerificationError(IdentityError):
-    """Raised when identity verification fails."""
-
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message, error_code or "IDENTITY_VERIFICATION_FAILED", details)
-
-
-class CredentialExpiredError(IdentityError):
-    """Raised when credentials have expired."""
-
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message, error_code or "CREDENTIAL_EXPIRED", details)
-
-
-# --- Integration errors ---
-
-class IntegrationError(AgentOSError):
-    """Base exception for integration-related errors."""
-
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message, error_code or "INTEGRATION_ERROR", details)
-
-
-class AdapterNotFoundError(IntegrationError):
-    """Raised when a requested adapter is not found."""
-
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message, error_code or "ADAPTER_NOT_FOUND", details)
-
-
-class AdapterTimeoutError(IntegrationError):
+class AdapterTimeoutError(AgentOSError):
     """Raised when an adapter operation times out."""
-
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message, error_code or "ADAPTER_TIMEOUT", details)
-
-
-# --- Configuration errors ---
+    pass
 
 class ConfigurationError(AgentOSError):
-    """Base exception for configuration-related errors."""
+    """Raised when configuration is invalid."""
+    pass
 
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message, error_code or "CONFIGURATION_ERROR", details)
+class PolicyEvaluationError(AgentOSError):
+    """Raised when policy evaluation fails."""
+    pass
 
+class PolicyNotFoundError(AgentOSError):
+    """Raised when a referenced policy file is missing."""
+    pass
 
-class InvalidPolicyError(ConfigurationError):
-    """Raised when a policy definition is invalid."""
+class InvalidPolicyError(AgentOSError):
+    """Raised when policy syntax or structure is invalid."""
+    pass
 
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message, error_code or "INVALID_POLICY", details)
+class IdentityError(AgentOSError):
+    """Raised for identity-related failures."""
+    pass
 
+class DelegationError(AgentOSError):
+    """Raised for delegation chain issues."""
+    pass
 
-class MissingConfigError(ConfigurationError):
-    """Raised when required configuration is missing."""
+class EvidenceError(AgentOSError):
+    """Raised when evidence is missing or invalid."""
+    pass
 
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message, error_code or "MISSING_CONFIG", details)
+class GovernanceTier(AgentOSError):
+    """Raised for governance tier violations."""
+    pass
 
+class TimeoutError(AgentOSError):
+    """Raised when an operation times out."""
+    pass
 
-# --- Rate limit errors ---
+class RetryableError(AgentOSError):
+    """Raised for errors that may be retried."""
+    pass
+
+class InvalidStateError(AgentOSError):
+    """Raised when the system is in an invalid state."""
+    pass
+
+class IntegrityError(AgentOSError):
+    """Raised for integrity check failures."""
+    pass
+
+class AuditError(AgentOSError):
+    """Raised for audit logging failures."""
+    pass
+
+class BudgetError(AgentOSError):
+    """Raised when a budget (e.g., token or cost limit) is exceeded."""
+    pass
+
+class QuotaExceededError(AgentOSError):
+    """Raised when a quota is exceeded."""
+    pass
 
 class RateLimitError(AgentOSError):
     """Raised when a rate limit is hit."""
+    pass
 
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message, error_code or "RATE_LIMIT_EXCEEDED", details)
+class DependencyError(AgentOSError):
+    """Raised for missing or misconfigured dependencies."""
+    pass
 
-
-# --- Security errors ---
-
-
-class SecurityError(AgentOSError):
-    """Raised when a sandbox security violation is detected."""
-
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message, error_code or "SECURITY_VIOLATION", details)
-
-
-# --- Serialization errors ---
-
+class VersionError(AgentOSError):
+    """Raised for version incompatibilities."""
+    pass
 
 class SerializationError(AgentOSError):
-    """Raised when state serialization or deserialization fails."""
+    """Raised for serialisation/deserialisation errors."""
+    pass
 
-    def __init__(self, message, error_code=None, details=None):
-        super().__init__(message, error_code or "SERIALIZATION_ERROR", details)
+class CryptographicError(AgentOSError):
+    """Raised for cryptographic operation failures."""
+    pass
+
+class AttestationError(AgentOSError):
+    """Raised for attestation failures."""
+    pass
+
+class EvidenceFreshnessError(AgentOSError):
+    """Raised when evidence is stale."""
+    pass
+class BudgetExceededError(AgentOSError):
+    """Raised when a budget is exceeded."""
+    pass
+class BudgetWarningError(AgentOSError):
+    """Raised when a budget warning threshold is exceeded."""
+    pass
+class BudgetError(AgentOSError):
+    pass
+
+class BudgetExceededError(AgentOSError):
+    pass
+
+class BudgetWarningError(AgentOSError):
+    pass
+
+class CredentialExpiredError(AgentOSError):
+    pass
+
+class CredentialNotFoundError(AgentOSError):
+    pass
+
+class PermissionDeniedError(AgentOSError):
+    pass
+
+class ResourceExhaustedError(AgentOSError):
+    pass
+
+class NotInitializedError(AgentOSError):
+    pass
+
+class AlreadyExistsError(AgentOSError):
+    pass
+
+class NotFoundError(AgentOSError):
+    pass
+
+class ValidationError(AgentOSError):
+    pass
+
+class UnsupportedError(AgentOSError):
+    pass
+
+class InternalError(AgentOSError):
+    pass
+class IdentityVerificationError(AgentOSError):
+    pass
+class IntegrationError(AgentOSError):
+    pass
+class MissingConfigError(AgentOSError):
+    pass
+class PolicyDeniedError(AgentOSError):
+    pass
+class PolicyError(AgentOSError):
+    pass
+class PolicyTimeoutError(AgentOSError):
+    pass
+class PolicyViolationError(AgentOSError):
+    pass
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+class AgentOSError(Exception):
+    pass
+
+class SecurityError(AgentOSError):
+    pass
+
+class GovernanceDenied(SecurityError):
+    pass
+
+class AdapterNotFoundError(AgentOSError):
+    pass
+
+class AdapterTimeoutError(AgentOSError):
+    pass
+
+class ConfigurationError(AgentOSError):
+    pass
+
+class PolicyEvaluationError(AgentOSError):
+    pass
+
+class PolicyNotFoundError(AgentOSError):
+    pass
+
+class InvalidPolicyError(AgentOSError):
+    pass
+
+class IdentityError(AgentOSError):
+    pass
+
+class DelegationError(AgentOSError):
+    pass
+
+class EvidenceError(AgentOSError):
+    pass
+
+class GovernanceTier(AgentOSError):
+    pass
+
+class TimeoutError(AgentOSError):
+    pass
+
+class RetryableError(AgentOSError):
+    pass
+
+class InvalidStateError(AgentOSError):
+    pass
+
+class IntegrityError(AgentOSError):
+    pass
+
+class AuditError(AgentOSError):
+    pass
+
+class BudgetError(AgentOSError):
+    pass
+
+class BudgetExceededError(AgentOSError):
+    pass
+
+class BudgetWarningError(AgentOSError):
+    pass
+
+class CredentialExpiredError(AgentOSError):
+    pass
+
+class CredentialNotFoundError(AgentOSError):
+    pass
+
+class PermissionDeniedError(AgentOSError):
+    pass
+
+class ResourceExhaustedError(AgentOSError):
+    pass
+
+class NotInitializedError(AgentOSError):
+    pass
+
+class AlreadyExistsError(AgentOSError):
+    pass
+
+class NotFoundError(AgentOSError):
+    pass
+
+class ValidationError(AgentOSError):
+    pass
+
+class UnsupportedError(AgentOSError):
+    pass
+
+class InternalError(AgentOSError):
+    pass

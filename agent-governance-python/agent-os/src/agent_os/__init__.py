@@ -9,7 +9,7 @@
 """
 
 from __future__ import annotations
-
+from .continuity import ContinuityVerifier, ContinuityTrace
 import warnings
 
 warnings.warn(

@@ -1,0 +1,9 @@
+=== WITHOUT CONTINUITY ===
+First call (allowed): Executed: SELECT * FROM users
+Policy changed to v2
+Second call (still allowed, but unsafe): Executed: DELETE FROM users
+
+=== WITH CONTINUITY (Nanogate) ===
+First call (allowed): Executed: SELECT * FROM users
+Policy changed to v2
+Continuity drift detected! Decision: DENY -> Execution DENIED
