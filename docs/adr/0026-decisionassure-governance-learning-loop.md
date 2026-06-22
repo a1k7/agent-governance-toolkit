@@ -60,6 +60,8 @@ We will add a new integration: **DecisionAssure Continuity Kernel**, which provi
   - "If any action is removed, the capability no longer exists."
 - Provides minimal witness verification and stronger causal evidence.
 
+**Example:** If the system discovers `read_credentials` + `export_data` → Credential Exfiltration, the counterfactual test removes `read_credentials` and checks whether `export_data` alone still constitutes a capability. It does not. The capability disappears. This proves that `read_credentials` is causally necessary for the capability.
+
 ### 4. Human Review Queue
 
 - Unknown capabilities are routed to governance analysts.
@@ -69,6 +71,8 @@ We will add a new integration: **DecisionAssure Continuity Kernel**, which provi
   - Novelty score
   - Impact score
   - Priority score
+
+The Human Review Queue is a separate approval surface from AGT's existing `require_approval` flow (ADR-0030). The existing flow handles operational approvals during execution. The learning loop's queue handles governance‑level approvals for ontology updates. The two surfaces do not intersect.
 
 ### 5. Ontology Evolution
 
@@ -86,6 +90,16 @@ We will add a new integration: **DecisionAssure Continuity Kernel**, which provi
 
 - A new metric that tracks long‑term governance learning.
 - Measures: base coverage, latest coverage, total knowledge gain, average gain per version.
+
+**GKAI Formula:**
+GKAI = 0.5 × (current_coverage) + 0.3 × (knowledge_gain) + 0.2 × (average_gain_per_version × 10)
+
+
+The metric is clamped between 0 and 100, with higher values indicating more mature governance. It is auditable: every component is derived from observable trace data and the ontology ledger. A reviewer can independently recompute the GKAI from the same data sources and verify the result.
+
+### Scope: Post‑Execution, Not Inline
+
+The Governance Learning Loop processes traces **post‑execution**, not inline. It does not intercept the policy evaluation path or introduce latency into agent execution. The loop runs as an asynchronous, offline process that analyzes historical traces, discovers patterns, and evolves the ontology. The policy evaluator continues to enforce static rules inline at the speed required for agentic execution.
 
 ---
 
@@ -149,6 +163,9 @@ The Governance Learning Loop introduces a self‑improving component to AGT. The
 3. **Replay Attacks**: The same capability is re‑submitted repeatedly.
    - Mitigation: Duplicate detection using witness hash deduplication. The system tracks `first_seen` and `occurrence_count` to avoid redundant reviews.
 
+4. **Denial of Service through High‑Volume Submissions**: An attacker floods the system with traces.
+   - Mitigation: Discovery requires a minimum occurrence count before a candidate is generated. This reduces noise in the queue.
+
 ### Blast‑Radius Bounds
 
 If the learning loop converges on a bad policy:
@@ -166,6 +183,12 @@ The Governance Learning Loop does not modify AGT's existing audit logs. It creat
 - **Ledger entries**: Versioned ontology changes with reviewer signatures.
 
 These records can be independently verified and audited alongside AGT's existing audit trail.
+
+### Audit Trail Guarantee
+
+The Governance Learning Loop provides a **detection guarantee**: it records what happened and provides replayable evidence that a capability emerged. It does not provide a **construction guarantee**: it does not claim that capabilities are unreachable by construction.
+
+The "couldn't have happened" guarantee is provided by AGT's existing structural controls (policy enforcement, identity verification, sandboxing, fail‑closed semantics). These two guarantees are orthogonal. The audit trail captures the first, references the second, and does not attempt the third.
 
 ---
 
@@ -186,8 +209,7 @@ These records can be independently verified and audited alongside AGT's existing
 - [DecisionAssure Continuity Kernel](https://github.com/a1k7/integrations/tree/main/decisionassure_continuity)
 - [TRACE Specification v0.1](https://github.com/agentrust-io/trace)
 
-
-
+---
 
 ### Assurance Classes and Reviewability
 
