@@ -1,21 +1,12 @@
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
-from datetime import datetime
-import hashlib
-import json
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any, Set
-from enum import Enum
-from datetime import datetime
-import hashlib
-import json
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any, Set
-from enum import Enum
-from datetime import datetime
-import hashlib
-import json
+from __future__ import annotations
 
+import hashlib
+import json
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional, Set
+
+from pydantic import BaseModel, Field
 
 
 # ... (existing ContinuityWitness, CCVResult, etc. remain unchanged) ...
