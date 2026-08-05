@@ -20,13 +20,13 @@ restricted builtins, sys.modules shadowing, and AST-based static analysis.
    (Firecracker/gVisor), or a WASM runtime. Use this sandbox only as a
    defense-in-depth layer.
 """
-
 from __future__ import annotations
 
 import ast
 import builtins as _py_builtins
 import importlib.abc
 import importlib.machinery
+import logging
 import os
 import pathlib
 import sys
@@ -35,10 +35,17 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
-from agent_os.continuity import ContinuityVerifier, ContinuityTrace
 from agent_os.exceptions import SecurityError
+
+# Lazy import for continuity to avoid hard dependency
+try:
+    from agent_os.continuity import ContinuityVerifier
+except ImportError:
+    ContinuityVerifier = None
+
+logger = logging.getLogger(__name__)
 
 
 class SandboxSecurityWarning(UserWarning):
@@ -149,7 +156,6 @@ _DANGEROUS_ATTR_NAMES: frozenset[str] = frozenset({
 # ---------------------------------------------------------------------------
 # Externalised configuration dataclass
 # ---------------------------------------------------------------------------
-
 @dataclass
 class SandboxSecurityConfig:
     """Structured configuration for sandbox security rules, loadable from YAML.
@@ -159,7 +165,6 @@ class SandboxSecurityConfig:
         blocked_builtins: Built-in functions to block.
         disclaimer: Disclaimer text shown in logs.
     """
-
     blocked_modules: list[str] = field(default_factory=lambda: list(_DEFAULT_BLOCKED_MODULES))
     blocked_builtins: list[str] = field(default_factory=lambda: list(_DEFAULT_BLOCKED_BUILTINS))
     disclaimer: str = ""
@@ -179,16 +184,12 @@ def load_sandbox_config(path: str) -> SandboxSecurityConfig:
         ValueError: If the YAML is missing the ``sandbox`` section.
     """
     import yaml
-
     if not os.path.exists(path):
         raise FileNotFoundError(f"Sandbox config not found: {path}")
-
     with open(path, "r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh.read())
-
     if not isinstance(data, dict) or "sandbox" not in data:
         raise ValueError(f"YAML file must contain a 'sandbox' section: {path}")
-
     sp = data["sandbox"]
     return SandboxSecurityConfig(
         blocked_modules=sp.get("blocked_modules", list(_DEFAULT_BLOCKED_MODULES)),
@@ -217,12 +218,11 @@ class SandboxConfig(BaseModel):
         enforce_ast_validation: When True (default), ``execute_code_sandboxed``
             runs ``validate_code`` first and refuses to execute on any
             violation (fail-closed).
-        enable_continuity: When True, enables pre‑/post‑execution hashing of
+        enable_continuity: When True, enables pre-/post-execution hashing of
             observer identity and reference frame to detect drift (default False).
         enforcement_mode: Mode for continuity drift handling: "enforce" (default)
             raises SecurityError on drift; "audit" logs but does not block.
     """
-
     blocked_modules: list[str] = Field(default_factory=lambda: list(_DEFAULT_BLOCKED_MODULES))
     blocked_builtins: list[str] = Field(default_factory=lambda: list(_DEFAULT_BLOCKED_BUILTINS))
     allowed_paths: list[str] = Field(default_factory=list)
@@ -230,14 +230,20 @@ class SandboxConfig(BaseModel):
     max_cpu_seconds: int | None = None
     shadow_sys_modules: bool = True
     enforce_ast_validation: bool = True
-    enable_continuity: bool = False
+    enable_continuity: bool = Field(default=False)
     enforcement_mode: str = Field(default="enforce")
+
+    @field_validator('enforcement_mode')
+    @classmethod
+    def validate_enforcement_mode(cls, v: str) -> str:
+        if v not in ("enforce", "audit"):
+            raise ValueError("enforcement_mode must be 'enforce' or 'audit'")
+        return v
 
 
 @dataclass
 class SecurityViolation:
     """Represents a security violation found during static analysis."""
-
     line: int
     column: int
     violation_type: str
@@ -251,15 +257,10 @@ class SandboxImportHook(importlib.abc.MetaPathFinder):
     Intercepts import attempts for blocked modules and raises SecurityError.
     Can be installed/uninstalled dynamically via install()/uninstall().
     """
-
     def __init__(self, blocked_modules: list[str]) -> None:
         self._blocked_modules = set(blocked_modules)
 
-    def find_module(
-        self,
-        fullname: str,
-        path: Any = None,
-    ) -> SandboxImportHook | None:
+    def find_module(self, fullname: str, path: Any = None) -> SandboxImportHook | None:
         """Check if this module should be blocked (legacy API)."""
         top_level = fullname.split(".")[0]
         if top_level in self._blocked_modules:
@@ -274,12 +275,7 @@ class SandboxImportHook(importlib.abc.MetaPathFinder):
             details={"module": fullname},
         )
 
-    def find_spec(
-        self,
-        fullname: str,
-        path: Any = None,
-        target: Any = None,
-    ) -> None:
+    def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> None:
         """Intercept import via the modern finder protocol."""
         top_level = fullname.split(".")[0]
         if top_level in self._blocked_modules:
@@ -303,13 +299,12 @@ class SandboxImportHook(importlib.abc.MetaPathFinder):
 
 class _ASTSecurityVisitor(ast.NodeVisitor):
     """AST visitor that detects security violations in code."""
-
     def __init__(self, blocked_modules: set, blocked_builtins: set) -> None:
         self._blocked_modules = blocked_modules
         self._blocked_builtins = blocked_builtins
         self.violations: list[SecurityViolation] = []
 
-    def visit_Import(self, node: ast.Import) -> None:  # noqa: N802
+    def visit_Import(self, node: ast.Import) -> None:
         for alias in node.names:
             top_level = alias.name.split(".")[0]
             if top_level in self._blocked_modules:
@@ -323,7 +318,7 @@ class _ASTSecurityVisitor(ast.NodeVisitor):
                 )
         self.generic_visit(node)
 
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:  # noqa: N802
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         if node.module:
             top_level = node.module.split(".")[0]
             if top_level in self._blocked_modules:
@@ -337,7 +332,7 @@ class _ASTSecurityVisitor(ast.NodeVisitor):
                 )
         self.generic_visit(node)
 
-    def visit_Call(self, node: ast.Call) -> None:  # noqa: N802
+    def visit_Call(self, node: ast.Call) -> None:
         # Detect calls to blocked builtins: eval(...), exec(...)
         if isinstance(node.func, ast.Name) and node.func.id in self._blocked_builtins:
             self.violations.append(
@@ -348,32 +343,23 @@ class _ASTSecurityVisitor(ast.NodeVisitor):
                     description=f"Call to blocked builtin '{node.func.id}'",
                 )
             )
-
         # Detect getattr(x, '<dangerous_dunder>') bypass
-        if (
-            isinstance(node.func, ast.Name)
+        if (isinstance(node.func, ast.Name)
             and node.func.id == "getattr"
-            and len(node.args) >= 2
-        ):
+            and len(node.args) >= 2):
             attr_arg = node.args[1]
-            if (
-                isinstance(attr_arg, ast.Constant)
+            if (isinstance(attr_arg, ast.Constant)
                 and isinstance(attr_arg.value, str)
-                and attr_arg.value in _DANGEROUS_ATTR_NAMES
-            ):
+                and attr_arg.value in _DANGEROUS_ATTR_NAMES):
                 self.violations.append(
                     SecurityViolation(
                         line=node.lineno,
                         column=node.col_offset,
                         violation_type="dunder_escape",
-                        description=(
-                            f"getattr() used to reach dangerous attribute "
-                            f"'{attr_arg.value}'"
-                        ),
+                        description=f"getattr() used to reach dangerous attribute '{attr_arg.value}'",
                     )
                 )
-
-        # Detect os.system(...) style calls
+        # Detect os.system(...) style calls and importlib.import_module bypass
         if isinstance(node.func, ast.Attribute):
             if isinstance(node.func.value, ast.Name):
                 if node.func.value.id in self._blocked_modules:
@@ -382,23 +368,14 @@ class _ASTSecurityVisitor(ast.NodeVisitor):
                             line=node.lineno,
                             column=node.col_offset,
                             violation_type="blocked_module_call",
-                            description=(
-                                f"Call to blocked module "
-                                f"'{node.func.value.id}.{node.func.attr}'"
-                            ),
+                            description=f"Call to blocked module '{node.func.value.id}.{node.func.attr}'",
                         )
                     )
-
-                # Detect importlib.import_module('blocked_mod') bypass
-                if (
-                    node.func.value.id == "importlib"
+                if (node.func.value.id == "importlib"
                     and node.func.attr == "import_module"
-                    and node.args
-                ):
+                    and node.args):
                     arg = node.args[0]
-                    if isinstance(arg, ast.Constant) and isinstance(
-                        arg.value, str
-                    ):
+                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
                         top_level = arg.value.split(".")[0]
                         if top_level in self._blocked_modules:
                             self.violations.append(
@@ -406,16 +383,12 @@ class _ASTSecurityVisitor(ast.NodeVisitor):
                                     line=node.lineno,
                                     column=node.col_offset,
                                     violation_type="blocked_import",
-                                    description=(
-                                        f"Dynamic import of blocked module "
-                                        f"'{arg.value}' via importlib"
-                                    ),
+                                    description=f"Dynamic import of blocked module '{arg.value}' via importlib",
                                 )
                             )
-
         self.generic_visit(node)
 
-    def visit_Attribute(self, node: ast.Attribute) -> None:  # noqa: N802
+    def visit_Attribute(self, node: ast.Attribute) -> None:
         """Detect dunder traversal escapes like ``().__class__.__bases__``."""
         if node.attr in _DANGEROUS_ATTR_NAMES:
             self.violations.append(
@@ -423,23 +396,18 @@ class _ASTSecurityVisitor(ast.NodeVisitor):
                     line=node.lineno,
                     column=node.col_offset,
                     violation_type="dunder_escape",
-                    description=(
-                        f"Access to dangerous attribute '{node.attr}' "
-                        "(common sandbox-escape pattern)"
-                    ),
+                    description=f"Access to dangerous attribute '{node.attr}' (common sandbox-escape pattern)",
                     severity="critical",
                 )
             )
         self.generic_visit(node)
 
-    def visit_Subscript(self, node: ast.Subscript) -> None:  # noqa: N802
+    def visit_Subscript(self, node: ast.Subscript) -> None:
         """Detect ``sys.modules['os']`` lookups even though ``sys`` is blocked."""
-        if (
-            isinstance(node.value, ast.Attribute)
+        if (isinstance(node.value, ast.Attribute)
             and node.value.attr == "modules"
             and isinstance(node.value.value, ast.Name)
-            and node.value.value.id == "sys"
-        ):
+            and node.value.value.id == "sys"):
             self.violations.append(
                 SecurityViolation(
                     line=node.lineno,
@@ -466,7 +434,6 @@ class _BlockedModuleProxy:
         not apply) at least cannot reach the proxy's class through standard
         attribute lookup.
     """
-
     __slots__ = ("_name",)
 
     def __init__(self, name: str) -> None:
@@ -617,12 +584,7 @@ class ExecutionSandbox:
     the module docstring for the threat model and recommended OS-level
     alternatives.
     """
-
-    def __init__(
-        self,
-        config: SandboxConfig | None = None,
-        policy: Any = None,
-    ) -> None:
+    def __init__(self, config: SandboxConfig | None = None, policy: Any = None) -> None:
         if config is None:
             warnings.warn(
                 "ExecutionSandbox() uses built-in sample rules. This is an "
@@ -638,16 +600,6 @@ class ExecutionSandbox:
         self.config = config or SandboxConfig()
         self.policy = policy
         self._hook = SandboxImportHook(self.config.blocked_modules)
-
-        # Validate enforcement_mode if continuity is enabled (optional, but safe)
-        if self.config.enable_continuity:
-            if self.config.enforcement_mode not in ("enforce", "audit"):
-                raise ValueError("enforcement_mode must be 'enforce' or 'audit'")
-
-        # Continuity verification support
-        self.continuity = None
-        if self.config.enable_continuity:
-            self.continuity = ContinuityVerifier(execution_id=f"exec-sandbox-{id(self)}")
 
     def check_import(self, module_name: str) -> bool:
         """Check if a module import is allowed.
@@ -684,29 +636,22 @@ class ExecutionSandbox:
         """
         if not self.config.allowed_paths:
             return False
-
         # Resolve symlinks and '..' to prevent path traversal attacks
         try:
             resolved = pathlib.Path(path).resolve()
         except (OSError, ValueError):
             return False
-
         for allowed in self.config.allowed_paths:
             try:
                 allowed_resolved = pathlib.Path(allowed).resolve()
             except (OSError, ValueError):
                 continue
             # Use is_relative_to for safe containment check
-            if resolved == allowed_resolved or resolved.is_relative_to(
-                allowed_resolved
-            ):
+            if resolved == allowed_resolved or resolved.is_relative_to(allowed_resolved):
                 return True
         return False
 
-    def create_restricted_globals(
-        self,
-        user_globals: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
+    def create_restricted_globals(self, user_globals: dict[str, Any] | None = None) -> dict[str, Any]:
         """Create a restricted globals dict with a whitelist of safe builtins.
 
         Only names in :data:`_SAFE_BUILTINS_WHITELIST` are exposed. Names in
@@ -727,19 +672,15 @@ class ExecutionSandbox:
         for name in _SAFE_BUILTINS_WHITELIST:
             if name in all_builtins:
                 safe_builtins[name] = all_builtins[name]
-
         # Replace blocked names with raising stubs so callers get a clear
         # SecurityError instead of NameError (better signal for auditors).
         for name in self.config.blocked_builtins:
             safe_builtins[name] = _make_blocked_builtin(name)
-
         restricted: dict[str, Any] = {"__builtins__": safe_builtins}
-
         if user_globals:
             for k, v in user_globals.items():
                 if k != "__builtins__":
                     restricted[k] = v
-
         return restricted
 
     def validate_code(self, code: str) -> list[SecurityViolation]:
@@ -763,7 +704,6 @@ class ExecutionSandbox:
                     severity="medium",
                 )
             ]
-
         visitor = _ASTSecurityVisitor(
             blocked_modules=set(self.config.blocked_modules),
             blocked_builtins=set(self.config.blocked_builtins),
@@ -815,6 +755,7 @@ class ExecutionSandbox:
             ``sys.modules`` cache. Concurrent ``execute_sandboxed`` calls
             from other threads serialize on a shared lock; nested calls
             on the same thread share the shadow without double-snapshotting.
+
             Disable ``shadow_sys_modules`` if you need concurrent host
             access to those modules.
 
@@ -845,46 +786,6 @@ class ExecutionSandbox:
             finally:
                 self._hook.uninstall()
 
-    def _capture_pre_continuity(self, context: dict) -> None:
-        """Capture pre‑execution hashes using current governance context."""
-        if not self.config.enable_continuity or self.continuity is None:
-            return
-        self.continuity.capture_pre_state(
-            agent_id=context.get("agent_id", "unknown"),
-            session_id=context.get("session_id", "unknown"),
-            memory_state=context.get("memory_state", {}),
-            policy_version=context.get("policy_version", "v1"),
-            delegation_chain=context.get("delegation_chain", []),
-            external_reference_state=context.get("external_reference_state", {}),
-        )
-
-    def _capture_post_continuity(self, context: dict) -> Optional[ContinuityTrace]:
-        """Capture post‑execution hashes and compare. Raises SecurityError on drift."""
-        if not self.config.enable_continuity or self.continuity is None:
-            return None
-        trace = self.continuity.capture_post_state(
-            agent_id=context.get("agent_id", "unknown"),
-            session_id=context.get("session_id", "unknown"),
-            memory_state=context.get("memory_state", {}),
-            policy_version=context.get("policy_version", "v1"),
-            delegation_chain=context.get("delegation_chain", []),
-            external_reference_state=context.get("external_reference_state", {}),
-        )
-        # Log the trace to stderr (production could use logging).
-        print(trace.to_json(), file=sys.stderr)
-        if not trace.continuity_valid:
-            mode = getattr(self.config, "enforcement_mode", "enforce")
-            if mode == "enforce":
-                raise SecurityError(
-                    f"Continuity drift detected: {trace.reference_frame_diff}",
-                    error_code="CONTINUITY_DRIFT",
-                    details={"trace": trace.__dict__},
-                )
-            else:  # audit mode
-                import logging
-                logging.warning(f"Continuity drift in audit mode: {trace.reference_frame_diff}")
-        return trace
-
     def execute_code_sandboxed(
         self,
         code: str,
@@ -894,7 +795,6 @@ class ExecutionSandbox:
         """Validate, then ``exec`` source code under all sandbox protections.
 
         Fail-closed flow:
-
         1. Parse and AST-validate ``code``. Any violation raises
            ``SecurityError`` before any code runs (when
            ``config.enforce_ast_validation`` is True).
@@ -902,11 +802,15 @@ class ExecutionSandbox:
         3. Install the import hook and shadow ``sys.modules``.
         4. Execute ``code`` and return the resulting globals dict.
 
+        Note:
+            Continuity drift is checked **after** execution; side effects may have
+            already occurred. This is a detection mechanism, not a rollback.
+
         Args:
             code: Python source to execute.
             user_globals: Optional extra names to expose to the code.
             continuity_context: Optional dict containing agent_id, session_id,
-                memory_state, policy_version, delegation_chain, external_reference_state.
+                memory_state, policy_version, delegation_chain, evidence_state.
                 Required when enable_continuity=True; ignored otherwise.
 
         Returns:
@@ -920,38 +824,31 @@ class ExecutionSandbox:
         if self.config.enforce_ast_validation:
             violations = self.validate_code(code)
             if violations:
-                descriptions = "; ".join(
-                    f"line {v.line}: {v.description}" for v in violations
-                )
+                descriptions = "; ".join(f"line {v.line}: {v.description}" for v in violations)
                 raise SecurityError(
                     f"Sandboxed code rejected by static analysis: {descriptions}",
                     error_code="SANDBOX_VALIDATION_FAILED",
-                    details={
-                        "violations": [
-                            {
-                                "line": v.line,
-                                "column": v.column,
-                                "type": v.violation_type,
-                                "description": v.description,
-                                "severity": v.severity,
-                            }
-                            for v in violations
-                        ]
-                    },
+                    details={"violations": [{"line": v.line, "column": v.column, "type": v.violation_type, "description": v.description, "severity": v.severity} for v in violations]},
                 )
 
         restricted = self.create_restricted_globals(user_globals)
-        ctx = continuity_context or {}
+
+        # Continuity verification per execution – create verifier if enabled.
+        verifier = None
+        if self.config.enable_continuity:
+            if ContinuityVerifier is None:
+                raise RuntimeError("Continuity feature requires the agent_os package")
+            if continuity_context is None:
+                # FIXED: removed keyword arguments
+                raise SecurityError("Continuity verification is enabled but no continuity_context was provided")
+            verifier = ContinuityVerifier(execution_id=f"exec-sandbox-{id(self)}-{id(self)}")
+            verifier.capture_pre_state(**continuity_context)
 
         def _run() -> None:
             exec(code, restricted)  # noqa: S102 - sandboxed execution by design
 
         try:
-            if self.config.enable_continuity:
-                self._capture_pre_continuity(ctx)
             self.execute_sandboxed(_run)
-            if self.config.enable_continuity:
-                self._capture_post_continuity(ctx)
         except SecurityError:
             raise
         except Exception as e:
@@ -963,6 +860,18 @@ class ExecutionSandbox:
                 details={"error_type": type(e).__name__, "error": str(e)},
             ) from e
 
+        # Post-execution continuity check
+        if verifier is not None:
+            trace = verifier.capture_post_state(**continuity_context)
+            logger.debug(trace.to_json())
+            if not trace.admissible:
+                mode = getattr(self.config, "enforcement_mode", "enforce")
+                if mode == "enforce":
+                    # FIXED: removed keyword arguments
+                    raise SecurityError(f"Continuity drift detected: {trace.diff}")
+                else:
+                    logger.warning("Continuity drift in audit mode: %s", trace.diff)
+
         # Strip restricted builtins from the returned dict; callers only
         # want the user-visible names that were created.
         return {k: v for k, v in restricted.items() if k != "__builtins__"}
@@ -970,13 +879,11 @@ class ExecutionSandbox:
 
 def _make_blocked_builtin(name: str) -> Callable[..., None]:
     """Create a function that raises SecurityError when called."""
-
     def _blocked(*args: Any, **kwargs: Any) -> None:
         raise SecurityError(
             f"Builtin '{name}' is blocked by sandbox policy",
             error_code="BLOCKED_BUILTIN",
             details={"builtin": name},
         )
-
     _blocked.__name__ = f"blocked_{name}"
     return _blocked

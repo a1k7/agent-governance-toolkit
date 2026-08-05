@@ -17,6 +17,8 @@ Or wrap an entire callable (agent, tool, function):
 from __future__ import annotations
 
 import functools
+import hashlib
+import json
 import logging
 import os
 import re
@@ -24,10 +26,19 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
+# Lazy import for continuity to make agentmesh usable without agent_os
+try:
+    from agent_os.continuity import ContinuityVerifier
+except ImportError:
+    ContinuityVerifier = None
+
 from .policy import Policy, PolicyDecision, PolicyEngine
 from .audit import AuditLog
+from .trace_sink import TraceConfig, TRACEAuditSink
 from .approval import ApprovalHandler, ApprovalRequest, AutoRejectApproval
 from .advisory import AdvisoryCheck, AdvisoryDecision
+from .approval_protocol import ActionBinding, ActionTarget, ApprovalCoordinator
+from .approval_bridge import ApprovalTransport, LegacyHandlerAdapter, submit_vote
 
 if TYPE_CHECKING:
     from hypervisor.models import ExecutionRing
@@ -105,8 +116,19 @@ class GovernanceConfig:
             injected into the evaluation context as ``ring.*`` fields.
         session_id: Agent session identifier used by RingBreachDetector
             to track per-session violation rates. Defaults to "".
+        approval_coordinator: Optional action-bound approval coordinator
+            (ADR-0030). When set with an approval_chain_id, require_approval
+            decisions are routed through the coordinator.
+        approval_chain_id: Chain ID for action-bound approval protocol.
+        approval_ttl_seconds: Time-to-live for approval requests.
+        approval_transport: Protocol-native approval source.
+        trace: Optional TRACE configuration for session closing.
+        enable_continuity: When True, captures pre-/post-execution hashes
+            to detect authority drift. Defaults to False.
+        enforcement_mode: Mode for handling continuity drift: "enforce"
+            raises GovernanceDenied on drift; "audit" logs warning only.
+            Defaults to "enforce".
     """
-
     policy: Union[str, Policy]
     agent_id: str = "*"
     audit: bool = True
@@ -117,11 +139,22 @@ class GovernanceConfig:
     conflict_strategy: str = "deny_overrides"
     ring: Optional["ExecutionRing"] = None
     session_id: str = ""
+    approval_coordinator: Optional[ApprovalCoordinator] = None
+    approval_chain_id: Optional[str] = None
+    approval_ttl_seconds: float = 300.0
+    approval_transport: Optional[ApprovalTransport] = None
+    trace: Optional[TraceConfig] = None
+    enable_continuity: bool = False
+    enforcement_mode: str = "enforce"
+
+    def __post_init__(self) -> None:
+        """Validate enforcement_mode regardless of continuity being enabled."""
+        if self.enforcement_mode not in ("enforce", "audit"):
+            raise ValueError("enforcement_mode must be 'enforce' or 'audit'")
 
 
 class GovernanceDenied(Exception):
     """Raised when a governed action is denied by policy."""
-
     def __init__(self, decision: PolicyDecision):
         self.decision = decision
         super().__init__(
@@ -135,7 +168,6 @@ class GovernedCallable:
 
     This is the core primitive — framework-specific wrappers build on it.
     """
-
     def __init__(self, fn: Callable, config: GovernanceConfig):
         self._fn = fn
         self._config = config
@@ -144,24 +176,62 @@ class GovernedCallable:
 
         # Load policy
         policy = config.policy
+        _bundle_bytes: bytes = b""
         if isinstance(policy, str):
             if os.path.isfile(policy):
+                with open(policy, "rb") as _f:
+                    _bundle_bytes = _f.read()
                 loaded = self._engine.load_yaml_file(policy)
             else:
+                _bundle_bytes = policy.encode("utf-8")
                 loaded = self._engine.load_yaml(policy)
         elif isinstance(policy, Policy):
             loaded = policy
             self._engine.load_policy(loaded)
+            _bundle_bytes = loaded.to_yaml().encode("utf-8") if hasattr(loaded, "to_yaml") else b""
         else:
             raise TypeError(
                 f"policy must be a file path, YAML string, or Policy object, "
                 f"got {type(policy).__name__}"
             )
 
+        # Hash of policy bundle bytes at load time — consumed by TRACEAuditSink (ADR-0032).
+        self._policy_bundle_hash: str = (
+            "sha256:" + hashlib.sha256(_bundle_bytes).hexdigest() if _bundle_bytes else ""
+        )
+
         # Ensure the policy applies to our agent_id. If no agents are
         # specified, default to wildcard so govern() works out of the box.
         if not loaded.agent and not loaded.agents:
             loaded.agents = ["*"]
+        # Policy version stamped onto action-bound approval records (ADR-0030),
+        # so an approval is bound to the policy revision in effect when granted.
+        self._policy_version = getattr(loaded, "version", "1.0") or "1.0"
+
+        # Policy bundle hash for TRACE emission (ADR-0032). Computed once at
+        # init from the raw policy bytes so emit() has a stable, verifiable hash.
+        if isinstance(policy, str):
+            if os.path.isfile(policy):
+                with open(policy, "rb") as _f:
+                    _policy_bytes = _f.read()
+            else:
+                _policy_bytes = policy.encode()
+        else:
+            _policy_bytes = json.dumps(
+                loaded.model_dump() if hasattr(loaded, "model_dump") else {},
+                sort_keys=True,
+                default=str,
+            ).encode()
+        self._policy_bundle_hash = "sha256:" + hashlib.sha256(_policy_bytes).hexdigest()
+
+        # TRACE session-close sink (ADR-0032) -- only active when config.trace is set.
+        self._trace_sink: Optional[TRACEAuditSink] = None
+        if config.trace is not None:
+            self._trace_sink = TRACEAuditSink(
+                config=config.trace,
+                agent_did=config.agent_id,
+                policy_bundle_hash=self._policy_bundle_hash,
+            )
 
         # Ring enforcement — only active when a ring is explicitly configured.
         self._ring_enforcer: Any = None
@@ -178,10 +248,34 @@ class GovernedCallable:
 
         functools.update_wrapper(self, fn)
 
-    def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        """Execute the wrapped function with governance enforcement."""
-        # Build evaluation context from kwargs
+    def __call__(self, *args: Any, continuity_context: dict | None = None, **kwargs: Any) -> Any:
+        """Execute the wrapped function with governance enforcement.
+
+        Args:
+            *args: Positional arguments to pass to the wrapped function.
+            continuity_context: Required when enable_continuity=True; dict with
+                agent_id, session_id, memory_state, policy_version,
+                delegation_chain, evidence_state.
+            **kwargs: Keyword arguments to pass to the wrapped function.
+
+        Returns:
+            The result of the wrapped function.
+
+        Raises:
+            GovernanceDenied: If policy or continuity drift deny the action.
+            ValueError: If continuity_context is missing when continuity is enabled.
+        """
         context = self._build_context(args, kwargs)
+
+        # Continuity: capture pre‑state if enabled
+        verifier = None
+        if self._config.enable_continuity:
+            if ContinuityVerifier is None:
+                raise RuntimeError("Continuity feature requires the agent_os package")
+            verifier = ContinuityVerifier(execution_id=f"gov-{id(self)}")
+            if continuity_context is None:
+                raise ValueError("continuity_context required when enable_continuity=True")
+            verifier.capture_pre_state(**continuity_context)
 
         # Ring enforcement — runs before policy evaluation so a denied ring
         # never reaches the policy engine.
@@ -237,7 +331,30 @@ class GovernedCallable:
                 raise GovernanceDenied(blocked)
 
         # Allowed — execute the wrapped function
-        return self._fn(*args, **kwargs)
+        try:
+            result = self._fn(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"Tool execution failed: {e}")
+            raise
+
+        # Continuity: capture post‑state and check for drift
+        if verifier is not None:
+            trace = verifier.capture_post_state(**continuity_context)
+            if not trace.admissible:
+                msg = f"Continuity drift: {trace.diff}"
+                if self._config.enforcement_mode == "enforce":
+                    raise GovernanceDenied(
+                        PolicyDecision(
+                            allowed=False,
+                            action="deny",
+                            matched_rule="continuity_drift",
+                            reason=msg,
+                        )
+                    )
+                else:
+                    logger.warning(msg)
+
+        return result
 
     def _check_ring(self, context: dict) -> Optional[PolicyDecision]:
         """Enforce ring-level resource constraints and inject ring context.
@@ -250,7 +367,6 @@ class GovernedCallable:
         from hypervisor.rings.enforcer import RING_CONSTRAINTS
 
         ring = self._config.ring
-
         # Circuit-breaker: if this agent/session has tripped the breaker from
         # prior violations, deny immediately without consulting the ring enforcer.
         session_id = self._config.session_id or "default"
@@ -271,7 +387,6 @@ class GovernedCallable:
         # "overwrite_protection_check" as FILESYSTEM.
         action_type = context.get("action", {}).get("type", "")
         resource_type = _infer_resource_type(action_type)
-
         ring_result = self._ring_enforcer.check_resource(ring, resource_type)
 
         # Always inject ring context so policy rules can reference it.
@@ -316,9 +431,19 @@ class GovernedCallable:
         )
 
     def _handle_approval(self, decision: PolicyDecision, context: dict) -> PolicyDecision:
-        """Route require_approval decisions through the approval handler."""
-        handler = self._config.approval_handler or AutoRejectApproval()
+        """Route require_approval decisions to the approver.
 
+        Uses the action-bound approval coordinator (ADR-0030) when both an
+        ``approval_coordinator`` and an ``approval_chain_id`` are configured;
+        otherwise falls back to the legacy approval-handler-only path.
+        """
+        if (
+            self._config.approval_coordinator is not None
+            and self._config.approval_chain_id is not None
+        ):
+            return self._handle_approval_via_coordinator(decision, context)
+
+        handler = self._config.approval_handler or AutoRejectApproval()
         request = ApprovalRequest(
             action=context.get("action", {}).get("type", "unknown"),
             rule_name=decision.matched_rule or "",
@@ -327,7 +452,6 @@ class GovernedCallable:
             context=context,
             approvers=decision.approvers,
         )
-
         approval = handler.request_approval(request)
 
         # Audit the approval decision
@@ -361,10 +485,159 @@ class GovernedCallable:
                 reason=f"Approval rejected by {approval.approver}: {approval.reason}",
             )
 
+    def _handle_approval_via_coordinator(
+        self, decision: PolicyDecision, context: dict
+    ) -> PolicyDecision:
+        """Route require_approval through the action-bound coordinator (ADR-0030).
+
+        The decision is bound to the exact action (digest), an approval request
+        is opened against the configured chain, the configured approval handler
+        supplies the approver's vote as one authenticated chain entry, and the
+        request is revalidated immediately before execution. Anything short of a
+        terminal allow over the same action/policy/chain version denies,
+        fail-closed (including an unpermitted approver identity or an expired
+        request).
+        """
+        coordinator = self._config.approval_coordinator
+        binding = self._build_action_binding(context)
+
+        decision_record, request = coordinator.open_request(
+            binding,
+            policy_rule_id=decision.matched_rule or "",
+            policy_version=self._policy_version,
+            chain_id=self._config.approval_chain_id,
+            ttl_seconds=self._config.approval_ttl_seconds,
+        )
+
+        # Obtain the approver's vote and record it as one authenticated chain
+        # entry at stage 0 (fail-closed on an unpermitted identity or expired
+        # request). A configured protocol-native transport receives the full
+        # request (action digest, versions, expiry); otherwise the legacy
+        # handler is bridged via the thin legacy request.
+        transport = self._config.approval_transport
+        if transport is not None:
+            result = submit_vote(
+                coordinator,
+                request,
+                transport.request_decision(request),
+                identity_assurance="webhook",
+            )
+        else:
+            handler = self._config.approval_handler or AutoRejectApproval()
+            result = LegacyHandlerAdapter(handler).collect(
+                coordinator,
+                request,
+                ApprovalRequest(
+                    action=context.get("action", {}).get("type", "unknown"),
+                    rule_name=decision.matched_rule or "",
+                    policy_name=decision.policy_name or "",
+                    agent_id=self._config.agent_id,
+                    context=context,
+                    approvers=decision.approvers,
+                ),
+            )
+        approval = result.approval
+
+        verdict = None
+        if result.submitted:
+            verdict = coordinator.validate_for_execution(
+                request.approval_request_id,
+                current_action_digest=binding.digest(),
+                current_policy_version=self._policy_version,
+                current_chain_version=request.approval_chain_version,
+            )
+
+        allowed = bool(verdict and verdict.allowed)
+        reason_code = verdict.reason_code if verdict is not None else result.error
+
+        # Audit linkage: tie the entry to the protocol record ids and the action
+        # digest (ADR-0030 section 7); reuse the AuditEntry assurance fields.
+        resolution = coordinator.store.get_resolution(request.approval_request_id)
+        if self._audit:
+            self._audit.log(
+                event_type="approval_decision",
+                agent_did=self._config.agent_id,
+                action=context.get("action", {}).get("type", "unknown"),
+                outcome="approved" if allowed else "rejected",
+                arguments_hash=binding.digest(),
+                approver_did=approval.approver or None,
+                policy_version=self._policy_version,
+                data={
+                    "rule": decision.matched_rule or "",
+                    "approver": approval.approver,
+                    "reason": approval.reason,
+                    "reason_code": reason_code,
+                    "policy_decision_id": decision_record.policy_decision_id,
+                    "approval_request_id": request.approval_request_id,
+                    "approval_resolution_id": (
+                        resolution.approval_resolution_id if resolution else None
+                    ),
+                },
+            )
+
+        if allowed:
+            return PolicyDecision(
+                allowed=True,
+                action="allow",
+                matched_rule=decision.matched_rule,
+                policy_name=decision.policy_name,
+                reason=(
+                    f"Approved by {approval.approver} "
+                    f"(request {request.approval_request_id})"
+                ),
+            )
+        return PolicyDecision(
+            allowed=False,
+            action="deny",
+            matched_rule=decision.matched_rule,
+            policy_name=decision.policy_name,
+            reason=(
+                f"Approval denied ({reason_code}) for request "
+                f"{request.approval_request_id}"
+            ),
+        )
+
+    def _build_action_binding(self, context: dict) -> ActionBinding:
+        """Construct the ADR-0030 ActionBinding for the current call."""
+        action = context.get("action", {})
+        if isinstance(action, dict):
+            action_type = action.get("type", "unknown")
+            resource = action.get("resource")
+        else:
+            action_type = str(action)
+            resource = None
+        tool_name = getattr(self._fn, "__name__", None) or action_type
+        subject = context.get("subject")
+        subject_id = subject if isinstance(subject, str) else None
+        # JSON-safe projection of the context so the action digest is stable and
+        # reproducible at the execution boundary.
+        parameters = {k: self._json_safe(v) for k, v in context.items()}
+        return ActionBinding(
+            operation="tool.invoke",
+            agent_id=self._config.agent_id,
+            target=ActionTarget(
+                tool_name=str(tool_name),
+                tool_schema_version="1",
+                resource=resource if isinstance(resource, str) else None,
+            ),
+            parameters=parameters,
+            subject_id=subject_id,
+        )
+
+    @staticmethod
+    def _json_safe(value: Any) -> Any:
+        """Coerce a value to JSON-canonicalizable types for the action digest."""
+        if value is None or isinstance(value, (bool, int, float, str)):
+            return value
+        if isinstance(value, dict):
+            return {str(k): GovernedCallable._json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [GovernedCallable._json_safe(v) for v in value]
+        return str(value)
+
     def _build_context(self, args: tuple, kwargs: dict) -> dict:
         """Build policy evaluation context from function arguments."""
         context: dict[str, Any] = {}
-
         # If kwargs contains 'action', use it directly
         if "action" in kwargs:
             action_val = kwargs["action"]
@@ -374,7 +647,6 @@ class GovernedCallable:
                 context["action"] = {"type": str(action_val)}
         elif args:
             context["action"] = {"type": str(args[0])}
-
         # Pass through other kwargs as context
         for key, val in kwargs.items():
             if key != "action":
@@ -382,7 +654,6 @@ class GovernedCallable:
                     context[key] = val
                 else:
                     context[key] = {"value": val}
-
         return context
 
     def _run_advisory(self, context: dict) -> Optional[AdvisoryDecision]:
@@ -390,10 +661,8 @@ class GovernedCallable:
         advisory = self._config.advisory
         if not advisory:
             return None
-
         try:
             decision = advisory.check(context)
-
             # Log advisory decision
             if self._audit:
                 self._audit.log(
@@ -408,7 +677,6 @@ class GovernedCallable:
                         "deterministic": False,
                     },
                 )
-
             return decision
         except Exception as e:
             logger.warning("Advisory check failed: %s — allowing (fail-open)", e)
@@ -424,6 +692,21 @@ class GovernedCallable:
         """Access the audit log for inspection."""
         return self._audit
 
+    def close_session(self) -> Optional[str]:
+        """Emit a TRACE v0.2 Trust Record for this governed session (ADR-0032).
+
+        Call once after all governed tool calls for a session are complete.
+        Writes a signed Trust Record JSON to the path configured in
+        GovernanceConfig.trace.output_path.
+
+        Returns the path of the written file, or None when TRACE emission is
+        not configured (config.trace is None), the audit log has no entries,
+        or the agent_id is not a SPIFFE URI or DID.
+        """
+        if self._trace_sink is None:
+            return None
+        return self._trace_sink.emit(self._audit)
+
 
 def govern(
     fn: Callable,
@@ -437,6 +720,13 @@ def govern(
     conflict_strategy: str = "deny_overrides",
     ring: Optional["ExecutionRing"] = None,
     session_id: str = "",
+    approval_coordinator: Optional[ApprovalCoordinator] = None,
+    approval_chain_id: Optional[str] = None,
+    approval_ttl_seconds: float = 300.0,
+    approval_transport: Optional[ApprovalTransport] = None,
+    trace: Optional[TraceConfig] = None,
+    enable_continuity: bool = False,
+    enforcement_mode: str = "enforce",
 ) -> GovernedCallable:
     """Wrap any callable with AGT governance — 2-line integration.
 
@@ -450,17 +740,25 @@ def govern(
             ``GovernanceDenied``.
         conflict_strategy: Conflict resolution strategy. Default
             ``"deny_overrides"`` (any deny wins).
+        ring: Optional execution ring for resource constraints.
+        session_id: Session identifier for ring breach detection.
+        approval_coordinator: Optional action-bound approval coordinator.
+        approval_chain_id: Chain ID for approval protocol.
+        approval_ttl_seconds: TTL for approval requests.
+        approval_transport: Protocol-native approval source.
+        trace: Optional TRACE session configuration.
+        enable_continuity: When True, captures pre-/post-execution hashes
+            to detect authority drift. Defaults to False.
+        enforcement_mode: Mode for handling drift: "enforce" raises
+            GovernanceDenied; "audit" logs warning only. Defaults to "enforce".
 
     Returns:
         A ``GovernedCallable`` that enforces policy before execution.
 
     Example::
-
         from agentmesh.governance import govern
-
         def send_email(to, body):
             ...
-
         safe_send = govern(send_email, policy="email-policy.yaml")
         safe_send(to="user@example.com", body="Hello")  # policy-checked
     """
@@ -474,5 +772,12 @@ def govern(
         conflict_strategy=conflict_strategy,
         ring=ring,
         session_id=session_id,
+        approval_coordinator=approval_coordinator,
+        approval_chain_id=approval_chain_id,
+        approval_ttl_seconds=approval_ttl_seconds,
+        approval_transport=approval_transport,
+        trace=trace,
+        enable_continuity=enable_continuity,
+        enforcement_mode=enforcement_mode,
     )
     return GovernedCallable(fn, config)

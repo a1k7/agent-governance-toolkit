@@ -1,117 +1,160 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-"""
-Continuous Admissibility Verifier for AGT.
+"""Continuity verification primitives.
+
+This module captures pre-/post-execution hashes of an agent's observer identity
+and reference frame and reports drift as a structured trace.
 """
 
+from __future__ import annotations
+
+import copy
 import hashlib
 import json
-import time
-from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from dataclasses import asdict, dataclass
+from typing import Any
 
 
-@dataclass
-class AdmissibilitySnapshot:
-    identity_hash: str
-    policy_hash: str
-    delegation_hash: str
-    evidence_hash: str
-    timestamp: float = field(default_factory=time.time)
+def _canonical_json(obj: Any) -> bytes:
+    return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode(
+        "utf-8"
+    )
 
 
-@dataclass
+def _sha256_hex(payload: Any) -> str:
+    digest = hashlib.sha256(_canonical_json(payload)).hexdigest()
+    return f"sha256:{digest}"
+
+
+@dataclass(frozen=True)
 class ContinuityTrace:
     execution_id: str
     admissible: bool
     decision: str
-    identity_hash: str
-    policy_hash: str
-    delegation_hash: str
-    evidence_hash: str
-    diff: Optional[Dict[str, Any]] = None
-    recommended_action: Optional[str] = None
-    control_objective: Optional[str] = None
+    observer_identity_hash: str
+    reference_frame_hash: str
+    diff: dict[str, Any]
 
     def to_json(self) -> str:
-        return json.dumps(self.__dict__, indent=2, default=str)
+        return json.dumps(asdict(self), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
 class ContinuityVerifier:
+    """Captures continuity state before/after execution and detects drift."""
+
     def __init__(self, execution_id: str):
         self.execution_id = execution_id
-        self._pre: Optional[AdmissibilitySnapshot] = None
-
-    def _hash_obj(self, obj: Any) -> str:
-        canonical = json.dumps(obj, sort_keys=True, separators=(",", ":"))
-        return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+        self._pre_observer_snapshot: bytes | None = None
+        self._pre_reference_snapshot: bytes | None = None
+        self._pre_observer_dict: dict | None = None
+        self._pre_reference_dict: dict | None = None
 
     def capture_pre_state(
         self,
+        *,
         agent_id: str,
         session_id: str,
-        memory_state: Dict,
+        memory_state: Any,
         policy_version: str,
-        delegation_chain: list,
-        evidence_state: Dict,
+        delegation_chain: Any,
+        evidence_state: Any,
     ) -> None:
-        identity_hash = self._hash_obj({
+        observer = {
             "agent_id": agent_id,
             "session_id": session_id,
             "memory_state": memory_state,
-        })
-        policy_hash = self._hash_obj(policy_version)
-        delegation_hash = self._hash_obj(delegation_chain)
-        evidence_hash = self._hash_obj(evidence_state)
-        self._pre = AdmissibilitySnapshot(identity_hash, policy_hash, delegation_hash, evidence_hash)
+        }
+        reference = {
+            "policy_version": policy_version,
+            "delegation_chain": delegation_chain,
+            "evidence_state": evidence_state,
+        }
+        # Store deep copies to avoid in-place mutation affecting diff
+        self._pre_observer_dict = copy.deepcopy(observer)
+        self._pre_reference_dict = copy.deepcopy(reference)
+        self._pre_observer_snapshot = _canonical_json(observer)
+        self._pre_reference_snapshot = _canonical_json(reference)
 
     def capture_post_state(
         self,
+        *,
         agent_id: str,
         session_id: str,
-        memory_state: Dict,
+        memory_state: Any,
         policy_version: str,
-        delegation_chain: list,
-        evidence_state: Dict,
+        delegation_chain: Any,
+        evidence_state: Any,
     ) -> ContinuityTrace:
-        if self._pre is None:
-            raise RuntimeError("pre‑state not captured")
+        if self._pre_observer_snapshot is None or self._pre_reference_snapshot is None:
+            raise ValueError("capture_pre_state() must be called before capture_post_state()")
 
-        identity_hash = self._hash_obj({
+        observer = {
             "agent_id": agent_id,
             "session_id": session_id,
             "memory_state": memory_state,
-        })
-        policy_hash = self._hash_obj(policy_version)
-        delegation_hash = self._hash_obj(delegation_chain)
-        evidence_hash = self._hash_obj(evidence_state)
+        }
+        reference = {
+            "policy_version": policy_version,
+            "delegation_chain": delegation_chain,
+            "evidence_state": evidence_state,
+        }
 
-        identity_ok = identity_hash == self._pre.identity_hash
-        policy_ok = policy_hash == self._pre.policy_hash
-        delegation_ok = delegation_hash == self._pre.delegation_hash
-        evidence_ok = evidence_hash == self._pre.evidence_hash
+        post_observer_snapshot = _canonical_json(observer)
+        post_reference_snapshot = _canonical_json(reference)
 
-        admissible = identity_ok and policy_ok and delegation_ok and evidence_ok
+        admissible = (post_observer_snapshot == self._pre_observer_snapshot) and (
+            post_reference_snapshot == self._pre_reference_snapshot
+        )
 
-        diff = None
-        if not admissible:
-            diff = {}
-            if not identity_ok:
-                diff["identity"] = {"old": self._pre.identity_hash, "new": identity_hash}
-            if not policy_ok:
-                diff["policy"] = {"old": self._pre.policy_hash, "new": policy_hash}
-            if not delegation_ok:
-                diff["delegation"] = {"old": self._pre.delegation_hash, "new": delegation_hash}
-            if not evidence_ok:
-                diff["evidence"] = {"old": self._pre.evidence_hash, "new": evidence_hash}
+        # Build diff by comparing the stored pre-state dicts (deep copies) with the current ones.
+        diff: dict[str, Any] = {}
+        pre_observer = self._pre_observer_dict
+        pre_reference = self._pre_reference_dict
+
+        if pre_observer and (pre_observer.get("agent_id") != observer.get("agent_id") or
+                             pre_observer.get("session_id") != observer.get("session_id")):
+            diff["identity"] = {
+                "old": {
+                    "agent_id": pre_observer.get("agent_id"),
+                    "session_id": pre_observer.get("session_id"),
+                },
+                "new": {
+                    "agent_id": observer.get("agent_id"),
+                    "session_id": observer.get("session_id"),
+                },
+            }
+
+        if pre_observer and pre_observer.get("memory_state") != observer.get("memory_state"):
+            diff["memory"] = {
+                "old": pre_observer.get("memory_state"),
+                "new": observer.get("memory_state"),
+            }
+
+        if pre_reference and pre_reference.get("policy_version") != reference.get("policy_version"):
+            diff["policy"] = {
+                "old": pre_reference.get("policy_version"),
+                "new": reference.get("policy_version"),
+            }
+
+        if pre_reference and pre_reference.get("delegation_chain") != reference.get("delegation_chain"):
+            diff["delegation"] = {
+                "old": pre_reference.get("delegation_chain"),
+                "new": reference.get("delegation_chain"),
+            }
+
+        if pre_reference and pre_reference.get("evidence_state") != reference.get("evidence_state"):
+            diff["evidence"] = {
+                "old": pre_reference.get("evidence_state"),
+                "new": reference.get("evidence_state"),
+            }
+
+        decision = "ALLOW" if admissible else "DENY"
 
         return ContinuityTrace(
             execution_id=self.execution_id,
             admissible=admissible,
-            decision="ALLOW" if admissible else "DENY",
-            identity_hash=identity_hash,
-            policy_hash=policy_hash,
-            delegation_hash=delegation_hash,
-            evidence_hash=evidence_hash,
+            decision=decision,
+            observer_identity_hash=_sha256_hex(observer),
+            reference_frame_hash=_sha256_hex(reference),
             diff=diff,
         )

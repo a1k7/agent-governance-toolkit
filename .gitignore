@@ -470,3 +470,5 @@ _site/
 # Code Security Assessment artifacts
 .security-assessment/
 *.tgz
+.DS_Store
+*.gradle/

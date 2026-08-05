@@ -3,7 +3,6 @@
 """
 Unit tests for continuity verification.
 """
-
 import pytest
 from agent_os.continuity import ContinuityVerifier
 from agent_os.sandbox import ExecutionSandbox, SandboxConfig
@@ -13,20 +12,12 @@ from agent_os.exceptions import SecurityError
 def test_continuity_verifier_no_drift():
     verifier = ContinuityVerifier("test")
     verifier.capture_pre_state(
-        agent_id="a",
-        session_id="s",
-        memory_state={"x": 1},
-        policy_version="v1",
-        delegation_chain=["root"],
-        evidence_state={"fresh": True},
+        agent_id="a", session_id="s", memory_state={"x": 1},
+        policy_version="v1", delegation_chain=["root"], evidence_state={"fresh": True},
     )
     trace = verifier.capture_post_state(
-        agent_id="a",
-        session_id="s",
-        memory_state={"x": 1},
-        policy_version="v1",
-        delegation_chain=["root"],
-        evidence_state={"fresh": True},
+        agent_id="a", session_id="s", memory_state={"x": 1},
+        policy_version="v1", delegation_chain=["root"], evidence_state={"fresh": True},
     )
     assert trace.admissible is True
     assert trace.decision == "ALLOW"
@@ -35,20 +26,12 @@ def test_continuity_verifier_no_drift():
 def test_continuity_verifier_policy_drift():
     verifier = ContinuityVerifier("test")
     verifier.capture_pre_state(
-        agent_id="a",
-        session_id="s",
-        memory_state={"x": 1},
-        policy_version="v1",
-        delegation_chain=["root"],
-        evidence_state={"fresh": True},
+        agent_id="a", session_id="s", memory_state={"x": 1},
+        policy_version="v1", delegation_chain=["root"], evidence_state={"fresh": True},
     )
     trace = verifier.capture_post_state(
-        agent_id="a",
-        session_id="s",
-        memory_state={"x": 1},
-        policy_version="v2",
-        delegation_chain=["root"],
-        evidence_state={"fresh": True},
+        agent_id="a", session_id="s", memory_state={"x": 1},
+        policy_version="v2", delegation_chain=["root"], evidence_state={"fresh": True},
     )
     assert trace.admissible is False
     assert trace.decision == "DENY"
@@ -58,23 +41,33 @@ def test_continuity_verifier_policy_drift():
 def test_continuity_verifier_delegation_drift():
     verifier = ContinuityVerifier("test")
     verifier.capture_pre_state(
-        agent_id="a",
-        session_id="s",
-        memory_state={"x": 1},
-        policy_version="v1",
-        delegation_chain=["root", "alice"],
-        evidence_state={"fresh": True},
+        agent_id="a", session_id="s", memory_state={"x": 1},
+        policy_version="v1", delegation_chain=["root", "alice"], evidence_state={"fresh": True},
     )
     trace = verifier.capture_post_state(
-        agent_id="a",
-        session_id="s",
-        memory_state={"x": 1},
-        policy_version="v1",
-        delegation_chain=["root"],
-        evidence_state={"fresh": True},
+        agent_id="a", session_id="s", memory_state={"x": 1},
+        policy_version="v1", delegation_chain=["root"], evidence_state={"fresh": True},
     )
     assert trace.admissible is False
     assert "delegation" in trace.diff
+
+
+def test_continuity_verifier_in_place_mutation():
+    verifier = ContinuityVerifier("test")
+    state = {"x": 1}
+    verifier.capture_pre_state(
+        agent_id="a", session_id="s", memory_state=state,
+        policy_version="v1", delegation_chain=["root"], evidence_state={"fresh": True},
+    )
+    state["x"] = 2  # mutate in-place
+    trace = verifier.capture_post_state(
+        agent_id="a", session_id="s", memory_state=state,
+        policy_version="v1", delegation_chain=["root"], evidence_state={"fresh": True},
+    )
+    assert not trace.admissible
+    assert "memory" in trace.diff
+    assert trace.diff["memory"]["old"] == {"x": 1}
+    assert trace.diff["memory"]["new"] == {"x": 2}
 
 
 def test_sandbox_continuity_enabled():
@@ -86,14 +79,12 @@ def test_sandbox_continuity_enabled():
         "memory_state": {},
         "policy_version": "v1",
         "delegation_chain": ["root"],
-        "external_reference_state": {},
+        "evidence_state": {"fresh": True},
     }
-    code = "x = 1"
+    user_globals = {"context": context}
+    code_no_drift = "x = 1"
+    sandbox.execute_code_sandboxed(code_no_drift, user_globals=user_globals, continuity_context=context)
 
-    # Without drift, should pass
-    sandbox.execute_code_sandboxed(code, continuity_context=context)
-
-    # With drift (policy change), should raise
-    context["policy_version"] = "v2"
-    with pytest.raises(SecurityError):
-        sandbox.execute_code_sandboxed(code, continuity_context=context)
+    code_with_drift = "context['policy_version'] = 'v2'"
+    with pytest.raises(SecurityError, match="Continuity drift"):
+        sandbox.execute_code_sandboxed(code_with_drift, user_globals=user_globals, continuity_context=context)
