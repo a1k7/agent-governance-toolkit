@@ -120,7 +120,10 @@ def detect_drift(traces, drift_threshold):
     click.echo(f"Decisions analyzed: {total_decisions}")
     click.echo(f"Sessions with drift: {drifted_sessions}")
     click.echo(f"Drift rate: {rate:.2f}%")
-
+    if drifted_sessions > 0:
+        click.echo("Drift detected - exiting non-zero", err=True)
+        sys.exit(_EXIT_BLOCK)
+    sys.exit(_EXIT_OK)
 
 def print_report(report: ImpactReport):
     print("\n" + "=" * 80)
