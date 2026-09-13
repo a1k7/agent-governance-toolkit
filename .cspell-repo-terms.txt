@@ -1052,3 +1052,10 @@ Bleichenbacher
 FFDH
 OCSP
 SPKI
+decisionassure
+impactv
+expl
+evals
+dunders
+Akhilesh
+Warik

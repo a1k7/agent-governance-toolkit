@@ -1,6 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-"""Generate a deterministic synthetic trace fixture for the DecisionAssure demo."""
+"""Generate a fully deterministic synthetic trace fixture (seed=42)."""
 import json
 import random
 import uuid
@@ -11,14 +11,19 @@ SEED = 42
 OUT = Path(__file__).parent / "sample_traces.jsonl"
 
 
-def generate_trace(rng, agent_id, num_decisions=5):
-    trace_id = str(uuid.uuid4())
+def _uuid_from_rng(rng: random.Random) -> uuid.UUID:
+    """Deterministic UUIDv4 derived from the seeded RNG."""
+    return uuid.UUID(int=rng.getrandbits(128), version=4)
+
+
+def generate_trace(rng, num_decisions=5):
+    trace_id = str(_uuid_from_rng(rng))
     decisions = []
     for _ in range(num_decisions):
         amount = rng.randint(30000, 60000)
         risk_score = rng.randint(20, 50)
         action = {
-            "id": str(uuid.uuid4()),
+            "id": str(_uuid_from_rng(rng)),
             "name": "refund",
             "parameters": {"amount": amount},
             "tool": "payment-api",
@@ -27,7 +32,7 @@ def generate_trace(rng, agent_id, num_decisions=5):
         }
         decision = {
             "action": action,
-            "agent_id": agent_id,
+            "agent_id": str(_uuid_from_rng(rng)),
             "agent_version": "1.2",
             "timestamp": FIXED_TS,
             "policy_version": "v4",
@@ -37,7 +42,7 @@ def generate_trace(rng, agent_id, num_decisions=5):
                 "evidence_age_hours": rng.choice([0.5, 1.0, 2.0]),
                 "model_version": "approved_v1",
             },
-            "evidence_used": [str(uuid.uuid4())],
+            "evidence_used": [str(_uuid_from_rng(rng))],
             "result": "ALLOW" if rng.random() > 0.3 else "DENY",
             "tool_permissions_at_time": ["read"],
             "model_version": "approved_v1",
@@ -53,7 +58,7 @@ def generate_trace(rng, agent_id, num_decisions=5):
 
 if __name__ == "__main__":
     rng = random.Random(SEED)
-    traces = [generate_trace(rng, str(uuid.uuid4()), rng.randint(1, 5)) for _ in range(100)]
+    traces = [generate_trace(rng, rng.randint(1, 5)) for _ in range(100)]
     with OUT.open("w", encoding="utf-8") as f:
         for trace in traces:
             f.write(json.dumps(trace) + "\n")

@@ -1,71 +1,39 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
+"""Integration helpers for CI/PR gates."""
+from __future__ import annotations
 
-"""Integration hooks for AGT and other agent frameworks."""
 import logging
-from typing import Dict, Any, Optional
+from typing import Any, Dict, Optional
 
 from .engine import ImpactEngine
-from .drift import DriftDetector
-from .models.trace import TraceBatch
-from .models.admissibility import GovernanceState
+from .loaders import load_authority, load_policy, load_traces
 
 logger = logging.getLogger(__name__)
 
 
 def analyze_impact_for_pr(
-    current_policy: Dict[str, Any],
-    proposed_policy: Dict[str, Any],
+    current_policy_path: str,
+    proposed_policy_path: str,
     traces_path: str,
-    authority: Optional[Dict[str, Any]] = None,
+    authority_current_path: Optional[str] = None,
+    authority_proposed_path: Optional[str] = None,
+    authority_shared_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Analyze the impact of a proposed policy change (e.g., in a PR).
-    Returns a dict with the ImpactReport.
-    """
-    from .cli import load_traces
+    """Convenience wrapper used by CI gates. All paths are file paths."""
+    if authority_current_path and authority_proposed_path:
+        baseline_auth = load_authority(authority_current_path)
+        proposed_auth = load_authority(authority_proposed_path)
+    elif authority_shared_path:
+        baseline_auth = proposed_auth = load_authority(authority_shared_path)
+    else:
+        raise ValueError(
+            "provide authority_shared_path or both authority_current_path and authority_proposed_path"
+        )
 
-    traces = load_traces(traces_path)
-    engine = ImpactEngine(traces)
-
-    if authority is None:
-        authority = {"delegations": [], "global_tool_capabilities": {}}
-
-    report = engine.analyze_impact(current_policy, authority, proposed_policy, authority)
+    batches = load_traces(traces_path)
+    curr = load_policy(current_policy_path)
+    prop = load_policy(proposed_policy_path)
+    engine = ImpactEngine(batches)
+    report = engine.analyze_impact(curr, baseline_auth, prop, proposed_auth)
     return report.model_dump(mode="json", exclude_none=True)
-
-
-def check_runtime_drift(
-    snapshot: GovernanceState,
-    current_policy_version: str,
-    current_authority: Dict[str, Any],
-    drift_threshold_hours: float = 1.0,
-) -> Dict[str, Any]:
-    """
-    Check if the current execution context has drifted from its governance snapshot.
-    """
-    detector = DriftDetector(drift_threshold_hours)
-    result = detector.detect_drift(snapshot, current_policy_version, current_authority)
-    return result
-
-
-def create_snapshot_from_context(context: Dict[str, Any]) -> GovernanceState:
-    """
-    Create a GovernanceState snapshot from an AGT execution context.
-    This should be called at session start.
-    """
-    return GovernanceState(
-        policy_version=context.get("policy_version", "unknown"),
-        policy_valid=True,
-        authority_valid=True,
-        authority_chain=context.get("authority_chain", []),
-        evidence_fresh=True,
-        evidence_age_hours=0.0,
-        capability_authorized=True,
-        tool_permissions=context.get("tool_permissions", []),
-        model_approved=True,
-        model_version=context.get("model_version", ""),
-        context_valid=True,
-        is_admissible=True,
-        details=context.get("details", {}),
-    )

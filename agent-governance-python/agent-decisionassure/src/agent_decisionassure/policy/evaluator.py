@@ -156,3 +156,65 @@ def build_env(decision, context: Dict[str, Any] | None = None) -> Dict[str, Any]
         "agent_id": str(decision.agent_id),
         "timestamp": decision.timestamp,
     }
+
+
+def validate_condition(node: Any) -> None:
+    """Recursively validate that node is a well-formed DSL expression."""
+    _validate_node(node, depth=0)
+
+
+def _validate_node(node: Any, depth: int) -> None:
+    if depth > _MAX_PATH_DEPTH:
+        raise PolicyError("condition nesting too deep")
+    if not isinstance(node, Mapping):
+        raise PolicyError(f"condition must be a mapping, got {type(node).__name__}")
+    if len(node) != 1:
+        raise PolicyError(f"condition must have exactly one key, got {list(node.keys())}")
+    (op, operand), = node.items()
+    if op in ("all", "any"):
+        if not isinstance(operand, list) or not operand:
+            raise PolicyError(f"'{op}' requires a non-empty list")
+        for child in operand:
+            _validate_node(child, depth + 1)
+        return
+    if op == "not":
+        _validate_node(operand, depth + 1)
+        return
+    if op in ("eq", "ne", "gt", "gte", "lt", "lte", "in", "nin"):
+        if not isinstance(operand, Sequence) or isinstance(operand, (str, bytes)):
+            raise PolicyError(f"'{op}' requires a list of two items")
+        if len(operand) != 2:
+            raise PolicyError(f"'{op}' requires exactly two items, got {len(operand)}")
+        return
+    raise PolicyError(f"unknown operator '{op}'")
+
+
+def validate_condition(node: Any) -> None:
+    """Recursively validate that node is a well-formed DSL expression."""
+    _validate_node(node, depth=0)
+
+
+def _validate_node(node: Any, depth: int) -> None:
+    if depth > _MAX_PATH_DEPTH:
+        raise PolicyError("condition nesting too deep")
+    if not isinstance(node, Mapping):
+        raise PolicyError(f"condition must be a mapping, got {type(node).__name__}")
+    if len(node) != 1:
+        raise PolicyError(f"condition must have exactly one key, got {list(node.keys())}")
+    (op, operand), = node.items()
+    if op in ("all", "any"):
+        if not isinstance(operand, list) or not operand:
+            raise PolicyError(f"'{op}' requires a non-empty list")
+        for child in operand:
+            _validate_node(child, depth + 1)
+        return
+    if op == "not":
+        _validate_node(operand, depth + 1)
+        return
+    if op in ("eq", "ne", "gt", "gte", "lt", "lte", "in", "nin"):
+        if not isinstance(operand, Sequence) or isinstance(operand, (str, bytes)):
+            raise PolicyError(f"'{op}' requires a list of two items")
+        if len(operand) != 2:
+            raise PolicyError(f"'{op}' requires exactly two items, got {len(operand)}")
+        return
+    raise PolicyError(f"unknown operator '{op}'")

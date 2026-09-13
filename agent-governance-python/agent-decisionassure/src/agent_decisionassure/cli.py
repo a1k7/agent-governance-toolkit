@@ -1,12 +1,11 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-"""CLI for DecisionAssure Impact – fail-closed."""
+"""CLI for DecisionAssure Impact – fail-closed, exit codes 0/1/2."""
 from __future__ import annotations
 
 import json
 import logging
 import sys
-from pathlib import Path
 from typing import List
 
 import click
@@ -20,13 +19,12 @@ from .loaders import (
     load_policy,
     load_traces,
 )
-from .models.trace import Action, DecisionTrace, TraceBatch
 from .models.impact import ImpactReport
 
 logger = logging.getLogger(__name__)
 
-_EXIT_USAGE = 2  # usage / input error
-_EXIT_BLOCK = 1  # governance regression
+_EXIT_USAGE = 2
+_EXIT_BLOCK = 1
 _EXIT_OK = 0
 
 
@@ -36,71 +34,46 @@ def cli():
     pass
 
 
-def _build_trace_batches(raw_records: List[dict]) -> List[TraceBatch]:
-    batches: List[TraceBatch] = []
-    for data in raw_records:
-        decisions = []
-        for d in data.get("decisions", []):
-            a = d.get("action", {})
-            action = Action(
-                id=a.get("id"),
-                name=a.get("name", ""),
-                parameters=a.get("parameters", {}),
-                tool=a.get("tool", ""),
-                version=a.get("version", ""),
-                transaction_amount=a.get("transaction_amount"),
-            )
-            model_version = d.get("context", {}).get("model_version", "") or d.get("model_version", "")
-            decisions.append(
-                DecisionTrace(
-                    action=action,
-                    agent_id=d.get("agent_id"),
-                    agent_version=d.get("agent_version", ""),
-                    timestamp=d.get("timestamp"),
-                    policy_version=d.get("policy_version", ""),
-                    authority_chain=d.get("authority_chain", []),
-                    context=d.get("context", {}),
-                    evidence_used=d.get("evidence_used", []),
-                    evidence_age_hours=d.get("context", {}).get("evidence_age_hours", 0.0),
-                    tool_permissions_at_time=d.get("tool_permissions_at_time", []),
-                    model_version=model_version,
-                    result=d.get("result", ""),
-                )
-            )
-        batches.append(
-            TraceBatch(
-                trace_id=data.get("trace_id"),
-                decisions=decisions,
-                environment=data.get("environment", {}),
-                metadata=data.get("metadata", {}),
-            )
-        )
-    return batches
-
-
 @cli.command()
 @click.option("--traces", required=True, type=click.Path(exists=True, dir_okay=False))
 @click.option("--policy-current", required=True, type=click.Path(exists=True, dir_okay=False))
 @click.option("--policy-proposed", required=True, type=click.Path(exists=True, dir_okay=False))
-@click.option("--authority", required=True, type=click.Path(exists=True, dir_okay=False),
-              help="Path to authority YAML (required).")
-@click.option("--output-json", type=click.Path(dir_okay=False))
+@click.option("--authority", "authority_shared", type=click.Path(exists=True, dir_okay=False), default=None,
+              help="Single authority YAML used for both baseline and proposed.")
+@click.option("--authority-current", type=click.Path(exists=True, dir_okay=False), default=None,
+              help="Baseline authority YAML.")
+@click.option("--authority-proposed", type=click.Path(exists=True, dir_okay=False), default=None,
+              help="Proposed authority YAML.")
+@click.option("--output-json", type=click.Path(dir_okay=False), default=None)
 @click.option("--verbose", is_flag=True)
-def impact(traces, policy_current, policy_proposed, authority, output_json, verbose):
+def impact(traces, policy_current, policy_proposed,
+           authority_shared, authority_current, authority_proposed, output_json, verbose):
     """Run counterfactual impact analysis."""
     logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO)
 
+    if authority_current and authority_proposed:
+        baseline_auth_path, proposed_auth_path = authority_current, authority_proposed
+    elif authority_shared:
+        baseline_auth_path = proposed_auth_path = authority_shared
+    else:
+        click.echo(
+            "❌ Provide either --authority (single) or both --authority-current and --authority-proposed.",
+            err=True,
+        )
+        sys.exit(_EXIT_USAGE)
+
     try:
-        trace_batches = _build_trace_batches(load_traces(traces))
+        trace_batches = load_traces(traces)
         curr_policy = load_policy(policy_current)
         prop_policy = load_policy(policy_proposed)
-        authority_data = load_authority(authority)
+        baseline_auth = load_authority(baseline_auth_path)
+        proposed_auth = load_authority(proposed_auth_path)
     except (TraceError, PolicyError, AuthorityError) as exc:
         click.echo(f"❌ Input error: {exc}", err=True)
         sys.exit(_EXIT_USAGE)
 
     engine = ImpactEngine(trace_batches)
-    report = engine.analyze_impact(curr_policy, authority_data, prop_policy, authority_data)
+    report = engine.analyze_impact(curr_policy, baseline_auth, prop_policy, proposed_auth)
 
     print_report(report)
 
@@ -122,8 +95,8 @@ def impact(traces, policy_current, policy_proposed, authority, output_json, verb
 def detect_drift(traces, policy_current, drift_threshold):
     """Detect governance drift in production traces."""
     try:
-        trace_batches = _build_trace_batches(load_traces(traces))
-        load_policy(policy_current)  # validate
+        trace_batches = load_traces(traces)
+        load_policy(policy_current)
     except (TraceError, PolicyError, AuthorityError) as exc:
         click.echo(f"❌ Input error: {exc}", err=True)
         sys.exit(_EXIT_USAGE)

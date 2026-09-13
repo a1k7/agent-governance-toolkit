@@ -1,7 +1,25 @@
-.PHONY: test coverage demo
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+.PHONY: install test demo demo-authority
+
+install:
+	pip install -e ".[dev]"
+
 test:
-	python -m pytest
-coverage:
-	python -m pytest --cov=agent_decisionassure
+	python -m pytest tests/ -v
+
 demo:
-	decisionassure impact --traces data/synthetic/sample_traces.jsonl --policy-current data/synthetic/policy_v4.yaml --policy-proposed data/synthetic/policy_v5.yaml --authority-current data/synthetic/authority_baseline.yaml --authority-proposed data/synthetic/authority_proposed.yaml
+	python ../../examples/decisionassure/generate_sample.py
+	decisionassure impact \
+	    --traces ../../examples/decisionassure/sample_traces.jsonl \
+	    --policy-current ../../examples/decisionassure/policy_v4.yaml \
+	    --policy-proposed ../../examples/decisionassure/policy_v5.yaml \
+	    --authority ../../examples/decisionassure/authority_baseline.yaml
+
+demo-authority:
+	decisionassure impact \
+	    --traces ../../examples/decisionassure/sample_traces.jsonl \
+	    --policy-current ../../examples/decisionassure/policy_v4.yaml \
+	    --policy-proposed ../../examples/decisionassure/policy_v4.yaml \
+	    --authority-current ../../examples/decisionassure/authority_baseline.yaml \
+	    --authority-proposed ../../examples/decisionassure/authority_proposed.yaml
