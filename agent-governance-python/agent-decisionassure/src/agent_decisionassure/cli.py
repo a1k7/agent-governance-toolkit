@@ -1,22 +1,33 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
+"""CLI for DecisionAssure Impact – fail-closed."""
+from __future__ import annotations
 
-import sys
 import json
 import logging
+import sys
 from pathlib import Path
 from typing import List
-from datetime import datetime, timedelta, timezone
 
 import click
-import yaml
 
 from .engine import ImpactEngine
-from .drift import DriftDetector
-from .models.trace import TraceBatch, DecisionTrace, Action
+from .loaders import (
+    AuthorityError,
+    PolicyError,
+    TraceError,
+    load_authority,
+    load_policy,
+    load_traces,
+)
+from .models.trace import Action, DecisionTrace, TraceBatch
 from .models.impact import ImpactReport
 
 logger = logging.getLogger(__name__)
+
+_EXIT_USAGE = 2  # usage / input error
+_EXIT_BLOCK = 1  # governance regression
+_EXIT_OK = 0
 
 
 @click.group()
@@ -25,196 +36,114 @@ def cli():
     pass
 
 
+def _build_trace_batches(raw_records: List[dict]) -> List[TraceBatch]:
+    batches: List[TraceBatch] = []
+    for data in raw_records:
+        decisions = []
+        for d in data.get("decisions", []):
+            a = d.get("action", {})
+            action = Action(
+                id=a.get("id"),
+                name=a.get("name", ""),
+                parameters=a.get("parameters", {}),
+                tool=a.get("tool", ""),
+                version=a.get("version", ""),
+                transaction_amount=a.get("transaction_amount"),
+            )
+            model_version = d.get("context", {}).get("model_version", "") or d.get("model_version", "")
+            decisions.append(
+                DecisionTrace(
+                    action=action,
+                    agent_id=d.get("agent_id"),
+                    agent_version=d.get("agent_version", ""),
+                    timestamp=d.get("timestamp"),
+                    policy_version=d.get("policy_version", ""),
+                    authority_chain=d.get("authority_chain", []),
+                    context=d.get("context", {}),
+                    evidence_used=d.get("evidence_used", []),
+                    evidence_age_hours=d.get("context", {}).get("evidence_age_hours", 0.0),
+                    tool_permissions_at_time=d.get("tool_permissions_at_time", []),
+                    model_version=model_version,
+                    result=d.get("result", ""),
+                )
+            )
+        batches.append(
+            TraceBatch(
+                trace_id=data.get("trace_id"),
+                decisions=decisions,
+                environment=data.get("environment", {}),
+                metadata=data.get("metadata", {}),
+            )
+        )
+    return batches
+
+
 @cli.command()
-@click.option(
-    "--traces",
-    required=True,
-    type=click.Path(exists=True, dir_okay=False),
-    help="Path to traces JSONL file.",
-)
-@click.option(
-    "--policy-current",
-    required=True,
-    type=click.Path(exists=True, dir_okay=False),
-    help="Path to current policy YAML.",
-)
-@click.option(
-    "--policy-proposed",
-    required=True,
-    type=click.Path(exists=True, dir_okay=False),
-    help="Path to proposed policy YAML.",
-)
-@click.option(
-    "--authority",
-    type=click.Path(exists=True, dir_okay=False),
-    help="Path to authority YAML (optional).",
-)
-@click.option(
-    "--output-json",
-    type=click.Path(dir_okay=False),
-    help="Export report to JSON file.",
-)
-@click.option(
-    "--verbose",
-    is_flag=True,
-    help="Enable verbose logging.",
-)
+@click.option("--traces", required=True, type=click.Path(exists=True, dir_okay=False))
+@click.option("--policy-current", required=True, type=click.Path(exists=True, dir_okay=False))
+@click.option("--policy-proposed", required=True, type=click.Path(exists=True, dir_okay=False))
+@click.option("--authority", required=True, type=click.Path(exists=True, dir_okay=False),
+              help="Path to authority YAML (required).")
+@click.option("--output-json", type=click.Path(dir_okay=False))
+@click.option("--verbose", is_flag=True)
 def impact(traces, policy_current, policy_proposed, authority, output_json, verbose):
     """Run counterfactual impact analysis."""
-    if verbose:
-        logging.basicConfig(level=logging.DEBUG)
-    else:
-        logging.basicConfig(level=logging.INFO)
-
-    # Fail closed: validate inputs
-    try:
-        click.echo(f"Loading traces from {traces}...")
-        trace_list = load_traces(traces)
-        if not trace_list:
-            click.echo("❌ No traces loaded. Failing closed.", err=True)
-            sys.exit(2)
-
-        click.echo(f"Loaded {len(trace_list)} traces.")
-    except Exception as e:
-        click.echo(f"❌ Failed to load traces: {e}", err=True)
-        sys.exit(2)
+    logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO)
 
     try:
-        with open(policy_current, "r") as f:
-            curr_policy = yaml.safe_load(f)
-        with open(policy_proposed, "r") as f:
-            prop_policy = yaml.safe_load(f)
-    except Exception as e:
-        click.echo(f"❌ Failed to load policy: {e}", err=True)
-        sys.exit(2)
+        trace_batches = _build_trace_batches(load_traces(traces))
+        curr_policy = load_policy(policy_current)
+        prop_policy = load_policy(policy_proposed)
+        authority_data = load_authority(authority)
+    except (TraceError, PolicyError, AuthorityError) as exc:
+        click.echo(f"❌ Input error: {exc}", err=True)
+        sys.exit(_EXIT_USAGE)
 
-    # Load authority from file or use default
-    if authority:
-        try:
-            with open(authority, "r") as f:
-                authority_data = yaml.safe_load(f)
-        except Exception as e:
-            click.echo(f"❌ Failed to load authority: {e}", err=True)
-            sys.exit(2)
-    else:
-        now = datetime.now(timezone.utc)
-        authority_data = {
-            "delegations": [
-                {
-                    "id": "delegation_123",
-                    "grantor": "admin",
-                    "grantee": "agent",
-                    "permissions": ["refund", "payment", "credit_decision", "aml_check"],
-                    "valid_from": (now - timedelta(days=1)).isoformat(),
-                    "valid_until": (now + timedelta(days=365)).isoformat(),
-                }
-            ],
-            "global_tool_capabilities": {"payment-api": ["read", "write"]},
-        }
-
-    engine = ImpactEngine(trace_list)
+    engine = ImpactEngine(trace_batches)
     report = engine.analyze_impact(curr_policy, authority_data, prop_policy, authority_data)
 
     print_report(report)
 
     if output_json:
-        with open(output_json, "w") as f:
+        with open(output_json, "w", encoding="utf-8") as f:
             json.dump(report.model_dump(mode="json", exclude_none=True), f, indent=2, default=str)
         click.echo(f"Report saved to {output_json}")
 
     if report.recommendation == "BLOCK":
-        click.echo("❌ BLOCK recommended – exiting with non-zero code.", err=True)
-        sys.exit(1)
-    else:
-        sys.exit(0)
+        click.echo("❌ BLOCK recommended", err=True)
+        sys.exit(_EXIT_BLOCK)
+    sys.exit(_EXIT_OK)
 
 
-@cli.command()
-@click.option(
-    "--traces",
-    required=True,
-    type=click.Path(exists=True, dir_okay=False),
-    help="Path to traces JSONL file.",
-)
-@click.option(
-    "--policy-current",
-    required=True,
-    type=click.Path(exists=True, dir_okay=False),
-    help="Path to current policy YAML.",
-)
-@click.option(
-    "--drift-threshold",
-    default=1.0,
-    help="Drift threshold in hours.",
-)
+@cli.command("detect-drift")
+@click.option("--traces", required=True, type=click.Path(exists=True, dir_okay=False))
+@click.option("--policy-current", required=True, type=click.Path(exists=True, dir_okay=False))
+@click.option("--drift-threshold", default=1.0, type=float)
 def detect_drift(traces, policy_current, drift_threshold):
     """Detect governance drift in production traces."""
-    trace_list = load_traces(traces)
-    detector = DriftDetector(drift_threshold)
+    try:
+        trace_batches = _build_trace_batches(load_traces(traces))
+        load_policy(policy_current)  # validate
+    except (TraceError, PolicyError, AuthorityError) as exc:
+        click.echo(f"❌ Input error: {exc}", err=True)
+        sys.exit(_EXIT_USAGE)
 
-    with open(policy_current, "r") as f:
-        policy = yaml.safe_load(f)
+    if not trace_batches:
+        click.echo("❌ No traces loaded", err=True)
+        sys.exit(_EXIT_USAGE)
 
-    drifted_sessions = 0
-    for trace in trace_list:
-        for decision in trace.decisions:
-            age = decision.evidence_age_hours
-            if age > drift_threshold:
-                drifted_sessions += 1
+    drifted = 0
+    for tb in trace_batches:
+        for decision in tb.decisions:
+            if decision.evidence_age_hours > drift_threshold:
+                drifted += 1
                 break
 
-    click.echo(f"Sessions analyzed: {len(trace_list)}")
-    click.echo(f"Sessions with drift: {drifted_sessions}")
-    click.echo(f"Drift rate: {drifted_sessions / len(trace_list) * 100:.2f}%")
-
-
-def load_traces(filepath: str) -> List[TraceBatch]:
-    traces = []
-    with open(filepath, "r") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                data = json.loads(line)
-                decisions = []
-                for d in data.get("decisions", []):
-                    action_data = d.get("action", {})
-                    action = Action(
-                        id=action_data.get("id"),
-                        name=action_data.get("name", ""),
-                        parameters=action_data.get("parameters", {}),
-                        tool=action_data.get("tool", ""),
-                        version=action_data.get("version", ""),
-                        transaction_amount=action_data.get("transaction_amount"),
-                    )
-                    model_version = d.get("context", {}).get("model_version", "") or d.get("model_version", "")
-                    decision = DecisionTrace(
-                        action=action,
-                        agent_id=d.get("agent_id"),
-                        agent_version=d.get("agent_version", ""),
-                        timestamp=d.get("timestamp"),
-                        policy_version=d.get("policy_version", ""),
-                        authority_chain=d.get("authority_chain", []),
-                        context=d.get("context", {}),
-                        evidence_used=d.get("evidence_used", []),
-                        evidence_age_hours=d.get("context", {}).get("evidence_age_hours", 0.0),
-                        tool_permissions_at_time=d.get("tool_permissions_at_time", []),
-                        model_version=model_version,
-                        result=d.get("result", ""),
-                    )
-                    decisions.append(decision)
-                trace = TraceBatch(
-                    trace_id=data.get("trace_id"),
-                    decisions=decisions,
-                    environment=data.get("environment", {}),
-                    metadata=data.get("metadata", {}),
-                )
-                traces.append(trace)
-            except Exception as e:
-                raise click.ClickException(f"Malformed trace line: {e}")
-                continue
-    return traces
+    total = len(trace_batches)
+    rate = (drifted / total * 100) if total else 0.0
+    click.echo(f"Sessions analyzed: {total}")
+    click.echo(f"Sessions with drift: {drifted}")
+    click.echo(f"Drift rate: {rate:.2f}%")
 
 
 def print_report(report: ImpactReport):
@@ -223,63 +152,25 @@ def print_report(report: ImpactReport):
     print("=" * 80)
     print(f"\nChange: {report.change_description}")
     print("-" * 80)
-    print("EXECUTION DATA")
-    print("-" * 80)
     print(f"Traces analyzed:              {report.total_traces_analyzed:>15,}")
     print(f"Decisions evaluated:          {report.total_decisions_evaluated:>15,}")
-
-    print("\n" + "-" * 80)
-    print("COUNTERFACTUAL GOVERNANCE DIFF")
-    print("-" * 80)
     print(f"ADMISSIBLE → INADMISSIBLE:    {report.transitions.admissible_to_inadmissible:>15,}")
     print(f"INADMISSIBLE → ADMISSIBLE:    {report.transitions.inadmissible_to_admissible:>15,}")
-    print(f"Invalidated:                  {report.transitions.invalidated:>15,}")
     print(f"Unchanged:                    {report.transitions.unchanged:>15,}")
     print(f"Impact rate:                  {report.impact_rate:>14.2f}%")
-
-    print("\n" + "-" * 80)
-    print("BLAST RADIUS")
-    print("-" * 80)
     print(f"Agents affected:              {len(report.blast_radius.agents_affected):>15}")
     print(f"Tools affected:               {len(report.blast_radius.tools_affected):>15}")
-    print(f"Policy versions affected:     {len(report.blast_radius.policy_versions_affected):>15}")
-    print(f"Decision types affected:      {len(report.blast_radius.decision_types_affected):>15}")
-
-    print("\n" + "-" * 80)
-    print("BUSINESS EXPOSURE")
-    print("-" * 80)
     exposure = report.estimated_exposure
-    if exposure >= 1e7:
-        exposure_str = f"₹{exposure/1e7:,.2f} crore"
-    else:
-        exposure_str = f"₹{exposure:,.2f}"
+    exposure_str = f"₹{exposure/1e7:,.2f} crore" if exposure >= 1e7 else f"₹{exposure:,.2f}"
     print(f"Estimated exposure:           {exposure_str:>15}")
-
-    print("\n" + "-" * 80)
-    print("GOVERNANCE ASSESSMENT")
-    print("-" * 80)
     print(f"Severity:                     {report.severity:>15}")
-    print(f"\nPrimary regression:")
-    print(f"  {report.primary_regression}")
-
+    print(f"Recommendation:               {report.recommendation:>15}")
     if report.per_decision_explanations:
-        print("\n" + "-" * 80)
-        print(f"TOP 10 AFFECTED DECISION EXPLANATIONS")
         print("-" * 80)
-        items = list(report.per_decision_explanations.items())
-        for i, (aid, expl) in enumerate(items[:10]):
-            print(f"{i+1}. Decision {aid[:8]}: {expl}")
-
-    print("\n" + "-" * 80)
-    print("DECISION")
-    print("-" * 80)
-    if report.recommendation == "BLOCK":
-        print(f"\n                         ❌ {report.recommendation}")
-    elif report.recommendation == "REVIEW":
-        print(f"\n                         ⚠️  {report.recommendation}")
-    else:
-        print(f"\n                         ✅ {report.recommendation}")
-    print("\n" + "=" * 80 + "\n")
+        print("TOP 5 AFFECTED DECISIONS")
+        for i, (aid, expl) in enumerate(list(report.per_decision_explanations.items())[:5]):
+            print(f"  {i+1}. {aid[:8]}: {expl}")
+    print("=" * 80 + "\n")
 
 
 if __name__ == "__main__":

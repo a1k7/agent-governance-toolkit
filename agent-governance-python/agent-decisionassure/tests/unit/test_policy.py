@@ -1,4 +1,5 @@
-import pytest
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
 import uuid
 from datetime import datetime, timezone, timedelta
 from agent_decisionassure.engine import ImpactEngine
@@ -12,7 +13,7 @@ def test_policy_evaluation():
         parameters={"amount": 45000},
         tool="payment-api",
         version="v3",
-        transaction_amount=200000,  # Pushes severity to HIGH -> BLOCK
+        transaction_amount=200000,
     )
     decision = DecisionTrace(
         action=action,
@@ -21,7 +22,7 @@ def test_policy_evaluation():
         timestamp=datetime.now(timezone.utc),
         policy_version="v4",
         authority_chain=["delegation_123"],
-        context={"risk_score": 35, "evidence_age_hours": 0.5},  # risk_score >= 30 → risk rule fails
+        context={"risk_score": 35, "evidence_age_hours": 0.5},
         evidence_used=[],
         evidence_age_hours=0.5,
         tool_permissions_at_time=["read"],
@@ -36,46 +37,25 @@ def test_policy_evaluation():
     )
     engine = ImpactEngine([trace])
 
-    # Data DSL policy format (matches examples/decisionassure/policy_v4.yaml)
     policy_v4 = {
         "version": "v4",
         "rules": [
-            {
-                "priority": 10,
-                "condition": {"lt": [{"field": "context.risk_score"}, 30]},
-                "effect": "ALLOW",
-            },
-            {
-                "priority": 5,
-                "condition": {
-                    "all": [
-                        {"eq": [{"field": "action.name"}, "refund"]},
-                        {"lte": [{"field": "action.parameters.amount"}, 50000]},
-                    ]
-                },
-                "effect": "ALLOW",
-            },
+            {"priority": 10, "condition": {"lt": [{"field": "context.risk_score"}, 30]}, "effect": "ALLOW"},
+            {"priority": 5, "condition": {"all": [
+                {"eq": [{"field": "action.name"}, "refund"]},
+                {"lte": [{"field": "action.parameters.amount"}, 50000]},
+            ]}, "effect": "ALLOW"},
         ],
         "default_effect": "DENY",
     }
     policy_v5 = {
         "version": "v5",
         "rules": [
-            {
-                "priority": 10,
-                "condition": {"lt": [{"field": "context.risk_score"}, 30]},
-                "effect": "ALLOW",
-            },
-            {
-                "priority": 5,
-                "condition": {
-                    "all": [
-                        {"eq": [{"field": "action.name"}, "refund"]},
-                        {"lte": [{"field": "action.parameters.amount"}, 40000]},
-                    ]
-                },
-                "effect": "ALLOW",
-            },
+            {"priority": 10, "condition": {"lt": [{"field": "context.risk_score"}, 30]}, "effect": "ALLOW"},
+            {"priority": 5, "condition": {"all": [
+                {"eq": [{"field": "action.name"}, "refund"]},
+                {"lte": [{"field": "action.parameters.amount"}, 40000]},
+            ]}, "effect": "ALLOW"},
         ],
         "default_effect": "DENY",
     }
@@ -95,7 +75,5 @@ def test_policy_evaluation():
     }
 
     report = engine.analyze_impact(policy_v4, authority, policy_v5, authority)
-    assert report.transitions.admissible_to_inadmissible == 1, (
-        f"Expected 1 transition, got {report.transitions}"
-    )
+    assert report.transitions.admissible_to_inadmissible == 1
     assert report.recommendation == "BLOCK"

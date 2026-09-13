@@ -1,9 +1,8 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
+"""DecisionAssure Impact – counterfactual governance replay engine."""
 
-"""DecisionAssure Impact - Governance change impact analysis for agentic AI."""
-
-__version__ = "0.1.0"
+__version__ = "5.0.0"
 
 from .engine import ImpactEngine
 from .drift import DriftDetector

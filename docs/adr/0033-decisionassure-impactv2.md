@@ -1,43 +1,37 @@
 ---
 title: "ADR 0033: DecisionAssure Impact – Counterfactual Governance Replay"
-status: proposed
-date: 2026-09-03
-authors: ["@a1k7"]
+last_reviewed: 2026-09-13
+owner: "@a1k7"
 ---
 
 # ADR 0033: DecisionAssure Impact – Counterfactual Governance Replay
 
 ## Context
 
-AGT records decisions via `MerkleAuditChain` and `AuditEntry`, but does not
-provide a way to predict the effect of governance changes on historical
-decisions. This ADR introduces a standalone module, `agent-decisionassure`,
-that replays recorded decision traces against proposed policy/authority
-changes and quantifies the impact.
+AGT records decisions via `MerkleAuditChain` / `AuditEntry` but provides no way
+to predict the effect of a governance change on historical decisions. This ADR
+introduces a standalone package, `agent-decisionassure`, that replays a JSONL
+trace export against a proposed policy/authority change.
 
-The module is a **new, optional package**. It does **not** modify
-`agentmesh`, `agent_os`, or any existing governance interface. It consumes
-JSONL trace files exported from AGT audit logs (a documented export format,
-not the `AuditEntry` object model).
+The module is new and optional; it does **not** modify `agentmesh`,
+`agent_os`, or any existing governance interface. It does **not** import
+`decisionassure_continuity`. Its trace input is a JSONL export produced by
+the user (there is no built-in exporter for `AuditEntry` in this PR).
 
 ## Decision
 
-Add `agent-governance-python/agent-decisionassure/` with:
+Add `agent-governance-python/agent-decisionassure/` providing:
 
-- A **data DSL** for policy conditions (`all`/`any`/`not`/`eq`/`lte`/`in`/…).
-  The DSL is pure data; it never executes Python.
-- A **counterfactual replay engine** that evaluates each decision against a
-  baseline and proposed governance state.
-- A CLI (`decisionassure`) with `impact` and `detect-drift` subcommands.
-- Fail-closed defaults: missing model, stale evidence, malformed policy, and
-  empty input are treated as inadmissible / non-zero exit.
-- Examples and fixtures under `examples/decisionassure/`.
+- A **pure data DSL** for policy conditions (`all`/`any`/`not`/`eq`/`lte`/…).
+- A **counterfactual replay engine** comparing baseline and proposed states.
+- A CLI (`decisionassure`) with `impact` and `detect-drift`.
+- Fail-closed defaults (missing model, stale evidence, malformed policy).
 
 ## Consequences
 
-- The module cannot regress existing behavior because it is a new package.
-- Docs and DSL must stay in sync; the DSL is the only supported policy format.
-- The module does not import or depend on `decisionassure_continuity`.
+- New package; cannot regress existing behaviour.
+- Requires its own CI registration (added in this PR).
+- Users must export traces to JSONL; no built-in exporter ships here.
 
 ## Related
 
@@ -45,4 +39,4 @@ Add `agent-governance-python/agent-decisionassure/` with:
 
 ## Signed-off-by
 
-Akhilesh Warik <akhilesh.warik@example.com>
+Akhilesh Warik <warikakhilesh@gmail.com>

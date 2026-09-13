@@ -1,3 +1,5 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
 [build-system]
 requires = ["setuptools>=78.1.1,<85.0"]
 build-backend = "setuptools.build_meta"
@@ -15,7 +17,6 @@ dependencies = [
     "PyYAML>=6,<7",
     "click>=8.0.0,<9",
     "python-dotenv>=1,<2",
-    "packaging>=23,<26",
 ]
 
 [project.optional-dependencies]
@@ -30,6 +31,3 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
-
-[tool.coverage.run]
-source = ["agent_decisionassure"]

@@ -1,8 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-
 import pytest
-from src.agent_decisionassure.security import redact, RedactionConfig
+from agent_decisionassure.security import redact, RedactionConfig
 
 
 def test_redact_string_ssn():
@@ -33,7 +32,7 @@ def test_redact_list():
 def test_redact_nested():
     data = {
         "user": {"name": "alice", "ssn": "123-45-6789"},
-        "messages": ["hi", "my ssn is 123-45-6789"]
+        "messages": ["hi", "my ssn is 123-45-6789"],
     }
     result = redact(data)
     assert result["user"]["name"] == "alice"

@@ -1,70 +1,41 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
+from pathlib import Path
 
 import pytest
-import subprocess
-import json
-import os
-from pathlib import Path
-from src.agent_decisionassure.engine import ImpactEngine
-from src.agent_decisionassure.cli import load_traces
 import yaml
 
-
-@pytest.fixture
-def sample_traces(tmp_path):
-    """Generate a small set of traces using the sample generator."""
-    # We assume the generator script is at examples/decisionassure/generate_sample.py
-    gen_path = Path("examples/decisionassure/generate_sample.py")
-    if not gen_path.exists():
-        pytest.skip("Sample generator not found; run from repo root")
-    
-    # Run the generator to create a temporary traces file
-    traces_file = tmp_path / "traces.jsonl"
-    # We could run the script, but it writes to a fixed path. Instead, we'll load the
-    # existing sample_traces.jsonl if it exists.
-    sample_file = Path("examples/decisionassure/sample_traces.jsonl")
-    if sample_file.exists():
-        # copy to tmp
-        import shutil
-        shutil.copy(sample_file, traces_file)
-    else:
-        pytest.skip("No sample traces file found")
-    return traces_file
+from agent_decisionassure.engine import ImpactEngine
+from agent_decisionassure.cli import _build_trace_batches
+from agent_decisionassure.loaders import load_traces
 
 
-def test_end_to_end_replay(sample_traces):
-    """Run the impact analysis on sample traces and verify we get a non-zero diff."""
-    policy_v4 = Path("examples/decisionassure/policy_v4.yaml")
-    policy_v5 = Path("examples/decisionassure/policy_v5.yaml")
-    if not policy_v4.exists() or not policy_v5.exists():
-        pytest.skip("Policy YAMLs not found")
+def _repo_root() -> Path:
+    # tests/integration/test_end_to_end.py -> repo root is 4 levels up
+    return Path(__file__).resolve().parents[4]
 
-    with open(policy_v4) as f:
-        curr_policy = yaml.safe_load(f)
-    with open(policy_v5) as f:
-        prop_policy = yaml.safe_load(f)
 
-    traces = load_traces(str(sample_traces))
-    engine = ImpactEngine(traces)
-    
-    authority = {
-        "delegations": [
-            {
-                "id": "delegation_123",
-                "grantor": "admin",
-                "grantee": "agent",
-                "permissions": ["refund", "payment", "credit_decision", "aml_check"],
-                "valid_from": "2026-01-01T00:00:00",
-                "valid_until": "2027-01-01T00:00:00",
-            }
-        ],
-        "global_tool_capabilities": {"payment-api": ["read", "write"]},
-    }
+def test_end_to_end_replay():
+    root = _repo_root()
+    traces = root / "examples/decisionassure/sample_traces.jsonl"
+    policy4 = root / "examples/decisionassure/policy_v4.yaml"
+    policy5 = root / "examples/decisionassure/policy_v5.yaml"
+    authority = root / "examples/decisionassure/authority_baseline.yaml"
 
-    report = engine.analyze_impact(curr_policy, authority, prop_policy, authority)
-    
-    # At least some decisions should be affected if traces contain refund amounts > 40k.
+    if not all(p.exists() for p in (traces, policy4, policy5, authority)):
+        pytest.skip("fixtures not present; run examples/decisionassure/generate_sample.py")
+
+    with policy4.open() as f:
+        curr = yaml.safe_load(f)
+    with policy5.open() as f:
+        prop = yaml.safe_load(f)
+    with authority.open() as f:
+        auth = yaml.safe_load(f)
+
+    batches = _build_trace_batches(load_traces(traces))
+    engine = ImpactEngine(batches)
+    report = engine.analyze_impact(curr, auth, prop, auth)
+
     affected = report.transitions.admissible_to_inadmissible + report.transitions.inadmissible_to_admissible
-    assert affected > 0, "Expected some decisions to be affected by the policy change"
+    assert affected > 0
     assert report.recommendation in ("BLOCK", "REVIEW")
