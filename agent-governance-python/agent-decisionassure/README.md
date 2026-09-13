@@ -2,28 +2,32 @@
 
 DecisionAssure Impact — counterfactual governance replay for AGT.
 
+All commands below assume the current directory is the repository root.
+
 ## Install
 
-```bash
-pip install -e ".[dev]"
-Generate Fixtures
-python examples/decisionassure/generate_sample.py
+    cd agent-governance-python/agent-decisionassure
+    pip install -e ".[dev]"
+    cd ../..
 
-Run Impact Analysis
-decisionassure impact \
-    --traces examples/decisionassure/sample_traces.jsonl \
-    --policy-current examples/decisionassure/policy_v4.yaml \
-    --policy-proposed examples/decisionassure/policy_v5.yaml \
-    --authority examples/decisionassure/authority_baseline.yaml
+## Generate fixtures
 
-To test an authority change, pass two authorities:
+    python examples/decisionassure/generate_sample.py
 
-decisionassure impact \
-    --traces examples/decisionassure/sample_traces.jsonl \
-    --policy-current examples/decisionassure/policy_v4.yaml \
-    --policy-proposed examples/decisionassure/policy_v4.yaml \
-    --authority-current examples/decisionassure/authority_baseline.yaml \
-    --authority-proposed examples/decisionassure/authority_proposed.yaml
+## Run impact analysis (policy change)
 
-Exit codes: 0 (allow), 1 (block), 2 (input error).
+    decisionassure impact --traces examples/decisionassure/sample_traces.jsonl --policy-current examples/decisionassure/policy_v4.yaml --policy-proposed examples/decisionassure/policy_v5.yaml --authority examples/decisionassure/authority_baseline.yaml
 
+## Run impact analysis (authority change)
+
+    decisionassure impact --traces examples/decisionassure/sample_traces.jsonl --policy-current examples/decisionassure/policy_v4.yaml --policy-proposed examples/decisionassure/policy_v4.yaml --authority-current examples/decisionassure/authority_baseline.yaml --authority-proposed examples/decisionassure/authority_proposed.yaml
+
+## Detect evidence drift
+
+    decisionassure detect-drift --traces examples/decisionassure/sample_traces.jsonl --drift-threshold 1.0
+
+## Exit codes
+
+- 0 — ALLOW
+- 1 — BLOCK (or drift detected)
+- 2 — input error

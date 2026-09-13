@@ -17,6 +17,7 @@ def _uuid_from_rng(rng):
 
 
 def _evidence_age(rng):
+    # Straddles the default 1.0h drift threshold
     return rng.choice([0.25, 0.5, 1.0, 1.5, 3.0, 6.0])
 
 

@@ -1,16 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-"""
-Safe policy DSL evaluator.
-
-Pure data structure — never executes Python, never accesses attributes or calls.
-
-    all / any / not
-    eq / ne / gt / gte / lt / lte / in / nin
-
-Values are either literals or {"field": "path.to.value"} resolved against a
-whitelisted set of roots (action, context, agent_id, timestamp).
-"""
+"""Safe policy DSL evaluator - no eval, no attribute access, no calls."""
 from __future__ import annotations
 from typing import Any, Dict, List, Mapping, Sequence
 
@@ -22,7 +12,7 @@ class PolicyError(ValueError):
     """Raised when a policy condition is malformed or not evaluable."""
 
 
-def _resolve_field(path: str, env: Mapping[str, Any]) -> Any:
+def _resolve_field(path, env):
     if not isinstance(path, str) or not path:
         raise PolicyError(f"field path must be a non-empty string, got {path!r}")
     parts = path.split(".")
@@ -31,7 +21,7 @@ def _resolve_field(path: str, env: Mapping[str, Any]) -> Any:
     root = parts[0]
     if root not in _ROOTS:
         raise PolicyError(f"unknown root '{root}' in path '{path}'")
-    current: Any = env.get(root)
+    current = env.get(root)
     for part in parts[1:]:
         if current is None:
             return None
@@ -52,29 +42,29 @@ def _resolve_field(path: str, env: Mapping[str, Any]) -> Any:
     return current
 
 
-def _is_field_ref(value: Any) -> bool:
+def _is_field_ref(value):
     return isinstance(value, Mapping) and set(value.keys()) == {"field"}
 
 
-def _resolve_value(value: Any, env: Mapping[str, Any]) -> Any:
+def _resolve_value(value, env):
     if _is_field_ref(value):
         return _resolve_field(value["field"], env)
     return value
 
 
-def _as_pair(value: Any, op: str):
+def _as_pair(value, op):
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or len(value) != 2:
         raise PolicyError(f"operator '{op}' expects a list of exactly 2 items, got {value!r}")
     return value[0], value[1]
 
 
-def _as_list(value: Any, op: str) -> List[Any]:
+def _as_list(value, op):
     if not isinstance(value, list):
         raise PolicyError(f"operator '{op}' expects a list, got {value!r}")
     return value
 
 
-def _cmp(a: Any, b: Any, symbol: str) -> bool:
+def _cmp(a, b, symbol):
     if a is None or b is None:
         return False
     try:
@@ -91,7 +81,7 @@ def _cmp(a: Any, b: Any, symbol: str) -> bool:
     raise PolicyError(f"unsupported comparison '{symbol}'")
 
 
-def _evaluate(node: Any, env: Mapping[str, Any]) -> bool:
+def _evaluate(node, env):
     if not isinstance(node, Mapping):
         raise PolicyError(f"condition node must be a mapping, got {type(node).__name__}")
     if len(node) != 1:
@@ -139,11 +129,11 @@ def _evaluate(node: Any, env: Mapping[str, Any]) -> bool:
     raise PolicyError(f"unsupported operator '{op}'")
 
 
-def evaluate_condition(condition: Any, env: Mapping[str, Any]) -> bool:
+def evaluate_condition(condition, env):
     return _evaluate(condition, env)
 
 
-def build_env(decision, context: Dict[str, Any] | None = None) -> Dict[str, Any]:
+def build_env(decision, context=None):
     return {
         "action": {
             "name": decision.action.name,
@@ -158,12 +148,16 @@ def build_env(decision, context: Dict[str, Any] | None = None) -> Dict[str, Any]
     }
 
 
-def validate_condition(node: Any) -> None:
+# ---------------------------------------------------------------------------
+# Load-time validation
+# ---------------------------------------------------------------------------
+
+def validate_condition(node):
     """Recursively validate that node is a well-formed DSL expression."""
     _validate_node(node, depth=0)
 
 
-def _validate_node(node: Any, depth: int) -> None:
+def _validate_node(node, depth):
     if depth > _MAX_PATH_DEPTH:
         raise PolicyError("condition nesting too deep")
     if not isinstance(node, Mapping):
@@ -185,36 +179,23 @@ def _validate_node(node: Any, depth: int) -> None:
             raise PolicyError(f"'{op}' requires a list of two items")
         if len(operand) != 2:
             raise PolicyError(f"'{op}' requires exactly two items, got {len(operand)}")
+        for item in operand:
+            _validate_field_ref(item)
         return
     raise PolicyError(f"unknown operator '{op}'")
 
 
-def validate_condition(node: Any) -> None:
-    """Recursively validate that node is a well-formed DSL expression."""
-    _validate_node(node, depth=0)
-
-
-def _validate_node(node: Any, depth: int) -> None:
-    if depth > _MAX_PATH_DEPTH:
-        raise PolicyError("condition nesting too deep")
-    if not isinstance(node, Mapping):
-        raise PolicyError(f"condition must be a mapping, got {type(node).__name__}")
-    if len(node) != 1:
-        raise PolicyError(f"condition must have exactly one key, got {list(node.keys())}")
-    (op, operand), = node.items()
-    if op in ("all", "any"):
-        if not isinstance(operand, list) or not operand:
-            raise PolicyError(f"'{op}' requires a non-empty list")
-        for child in operand:
-            _validate_node(child, depth + 1)
+def _validate_field_ref(value):
+    """If value is a field reference, verify its root and path depth."""
+    if not isinstance(value, Mapping):
         return
-    if op == "not":
-        _validate_node(operand, depth + 1)
-        return
-    if op in ("eq", "ne", "gt", "gte", "lt", "lte", "in", "nin"):
-        if not isinstance(operand, Sequence) or isinstance(operand, (str, bytes)):
-            raise PolicyError(f"'{op}' requires a list of two items")
-        if len(operand) != 2:
-            raise PolicyError(f"'{op}' requires exactly two items, got {len(operand)}")
-        return
-    raise PolicyError(f"unknown operator '{op}'")
+    if set(value.keys()) != {"field"}:
+        raise PolicyError(f"unexpected mapping in operand: {value!r}")
+    path = value["field"]
+    if not isinstance(path, str) or not path:
+        raise PolicyError(f"field reference must be a non-empty string, got {path!r}")
+    parts = path.split(".")
+    if len(parts) > _MAX_PATH_DEPTH:
+        raise PolicyError(f"field path too deep ({len(parts)} > {_MAX_PATH_DEPTH}): {path!r}")
+    if parts[0] not in _ROOTS:
+        raise PolicyError(f"unknown root '{parts[0]}' in path {path!r}; must be one of {_ROOTS}")

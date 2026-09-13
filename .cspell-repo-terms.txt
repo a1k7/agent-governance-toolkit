@@ -1059,3 +1059,5 @@ evals
 dunders
 Akhilesh
 Warik
+frobnicate
+getrandbits
